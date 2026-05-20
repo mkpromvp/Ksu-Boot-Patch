@@ -78,7 +78,6 @@ jobs:
 
           # 2. لو مفيش مسار يدوي، بندور تلقائي على init_boot أو boot مباشر
           else
-            # الأولوية لـ init_boot في الأجهزة الحديثة
             TARGET_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i 'init_boot\.img$' | head -1)
             
             if [ -z "$TARGET_PATH" ]; then
@@ -102,7 +101,6 @@ jobs:
               curl -sL https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz | tar -xvz
               chmod +x payload-dumper-go
               
-              # محاولة استخراج init_boot أولاً ثم boot كـ fallback
               ./payload-dumper-go -p init_boot -o extracted_rom payload.bin 2>/dev/null || ./payload-dumper-go -p boot -o extracted_rom payload.bin
               TARGET_FILE=$(find extracted_rom -name '*.img' | head -1)
             fi
@@ -129,33 +127,39 @@ jobs:
     # ────────────────────────────────────────────
       run: |
         echo "::group::Analyze Stock Kernel"
-        # تحميل وتجهيز magiskboot للفحص
+        set +e # منع الغلق المفاجئ أثناء البحث والتصفية للبيانات
+
         MAGISK_APK=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | jq -r '.assets[] | select(.name | test("Magisk-v[0-9]")) | .browser_download_url' | head -1)
         curl -sL "$MAGISK_APK" -o magisk.apk
         unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
         mv libmagiskboot.so magiskboot && chmod +x magiskboot
 
-        # فك تفصيلي لمعرفة البيانات الصافية
         mkdir -p info_workspace && cp stock_target.img info_workspace/ && cd info_workspace
         ../magiskboot unpack stock_target.img
         
         KERNEL_FILE=$(find . -maxdepth 1 \( -name 'kernel' -o -name 'Image' -o -name 'kernel.gz' \) | head -1)
+        
+        KERNEL_VER="Unknown"
+        KERNEL_KMI="Generic-GKI"
+        ANDROID_VER="Auto"
+
         if [ -n "$KERNEL_FILE" ]; then
           ../magiskboot decompress "$KERNEL_FILE" decompressed_k 2>/dev/null
-          [ -s decompressed_k ] && TARGET_K="decompressed_k" || TARGET_K="$KERNEL_FILE"
+          if [ -s decompressed_k ]; then TARGET_K="decompressed_k"; else TARGET_K="$KERNEL_FILE"; fi
           
           KERNEL_FULL=$(strings "$TARGET_K" | grep -E "Linux version [0-9]+\.[0-9]+" | head -1)
-          [ -z "$KERNEL_FULL" ] && KERAL_FULL=$(strings "$TARGET_K" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+-android[0-9]+-[0-9]+" | head -1)
+          if [ -z "$KERNEL_FULL" ]; then
+            KERNEL_FULL=$(strings "$TARGET_K" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+-android[0-9]+-[0-9]+" | head -1)
+          fi
           
-          KERNEL_VER=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-          KSHORT=$(echo "$KERNEL_VER" | cut -d. -f1,2)
-          ANDROID_VER=$(echo "$KERNEL_FULL" | grep -oE "android[0-9]+" | head -1)
-          KERNEL_KMI="${KSHORT}-${ANDROID_VER}"
+          if [ -n "$KERNEL_FULL" ]; then
+            KERNEL_VER=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+            KSHORT=$(echo "$KERNEL_VER" | cut -d. -f1,2)
+            ANDROID_VER=$(echo "$KERNEL_FULL" | grep -oE "android[0-9]+" | head -1)
+            KERNEL_KMI="${KSHORT}-${ANDROID_VER}"
+          fi
         else
-          # لو الملف عبارة عن init_boot خالي من الكيرنال، نضع قيم افتراضية آمنة للعرض فقط
-          KERNEL_VER="استخراج من الـ init_boot مباشر"
-          KERNEL_KMI="Generic GKI"
-          ANDROID_VER="تلقائي"
+          KERNEL_VER="Direct init_boot patch"
         fi
 
         echo "Kernel Version: $KERNEL_VER"
@@ -164,7 +168,9 @@ jobs:
         echo "KERNEL_VER=$KERNEL_VER" >> $GITHUB_ENV
         echo "KERNEL_KMI=$KERNEL_KMI" >> $GITHUB_ENV
         echo "ANDROID_VER=$ANDROID_VER" >> $GITHUB_ENV
+        
         cd .. && rm -rf info_workspace
+        set -e # إعادة تفعيل الحماية الصارمة لباقي الخطوات الهامة
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
@@ -173,7 +179,6 @@ jobs:
       run: |
         echo "::group::KernelSU-Next Patcher"
         
-        # جلب أحدث إصدار من أداة ksu_patch الرسمية لـ KernelSU-Next المتوافقة مع الـ SUSFS
         KSUN_RELEASE=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest)
         KSUN_TAG=$(echo "$KSUN_RELEASE" | jq -r '.tag_name')
         PATCHER_URL=$(echo "$KSUN_RELEASE" | jq -r '.assets[] | select(.name | test("ksu_patch.*linux.*amd64")) | .browser_download_url' | head -1)
@@ -187,7 +192,6 @@ jobs:
         curl -L "$PATCHER_URL" -o ksu_patch && chmod +x ksu_patch
         
         echo "Running Official Patching Process..."
-        # تشغيل الأداة لحقن الكود والـ SUSFS مباشرة جوه الملف الأصلي بدون فك يدوي ميكانيكي
         ./ksu_patch -i stock_target.img -o ksu_patched_boot.img --susfs
         
         echo "GKI_TAG=$KSUN_TAG" >> $GITHUB_ENV
@@ -203,7 +207,6 @@ jobs:
         echo "::group::Managers"
         mkdir -p managers
         
-        # تنزيل مانجر KernelSU-Next الرسمي المتوافق
         URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest \
           | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
         [ -n "$URL" ] && [ "$URL" != "null" ] \
@@ -288,13 +291,13 @@ jobs:
         | **Android Base** | $ANDROID_VER |
 
         ### ⚡ Flash Commands (حسب الملف المرفوع)
-        لو الملف الأصلي كان `boot.img`:
+        لو الملف الأصلي كان \`boot.img\`:
         \`\`\`bash
         fastboot flash boot ksu_patched_boot.img
         fastboot reboot
         \`\`\`
 
-        لو الملف الأصلي كان `init_boot.img`:
+        لو الملف الأصلي كان \`init_boot.img\`:
         \`\`\`bash
         fastboot flash init_boot ksu_patched_boot.img
         fastboot reboot
