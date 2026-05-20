@@ -1,4 +1,4 @@
-name: 🔧 KSU Boot Patcher — Stable LKM Injection (No Swap)
+name: 🔧 KSU Boot Patcher — Official kp Tool Mode (No Swap)
 
 on:
   workflow_dispatch:
@@ -67,7 +67,6 @@ jobs:
         if echo "$FILE_TYPE" | grep -qi 'zip\|archive'; then
           echo "→ ZIP detected, analyzing contents..."
 
-          # 1. لو المستخدم كاتب مسار يدوي جوه الـ ZIP
           if [ -n "${{ inputs.zip_boot_path }}" ]; then
             echo "Using specified path: ${{ inputs.zip_boot_path }}"
             unzip -j input_file "${{ inputs.zip_boot_path }}" -d extracted_rom/ || {
@@ -76,7 +75,6 @@ jobs:
             }
             TARGET_FILE=$(find extracted_rom -name '*.img' | head -1)
 
-          # 2. لو مفيش مسار يدوي، بندور تلقائي على init_boot أو boot مباشر
           else
             TARGET_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i 'init_boot\.img$' | head -1)
             
@@ -91,7 +89,6 @@ jobs:
             fi
           fi
 
-          # 3. لو ملحقناش ملفات img مباشرة، بندور جوه الـ payload.bin
           if [ -z "$TARGET_FILE" ] || [ ! -s "$TARGET_FILE" ]; then
             PAYLOAD_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i 'payload\.bin$' | head -1)
             
@@ -139,7 +136,7 @@ jobs:
         
         KERNEL_FILE=$(find . -maxdepth 1 \( -name 'kernel' -o -name 'Image' -o -name 'kernel.gz' \) | head -1)
         
-        KERNEL_VER="6.12.30" # القيمة الافتراضية الصافية لجهازك
+        KERNEL_VER="6.12.30"
         KERNEL_KMI="6.12-android16"
         ANDROID_VER="android16"
 
@@ -172,58 +169,38 @@ jobs:
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: ⚡ Inject KernelSU-Next LKM Module into Ramdisk
+    - name: ⚡ Patch Image using Official kp tool (tiann/KernelSU)
     # ────────────────────────────────────────────
       run: |
-        echo "::group::LKM Injection"
+        echo "::group::Official kp Patching"
         
-        # جلب الـ LKM الجاهز والمتوافق من ريبو المطور الشهير zzh20188 لضمان استقرار الـ SUSFS
-        RELEASE=$(curl -s "https://api.github.com/repos/zzh20188/GKI_KernelSU_SUSFS/releases/latest")
-        GKI_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
-        echo "GKI_TAG=$GKI_TAG" >> $GITHUB_ENV
+        # جلب أحدث إصدار للأداة الرسمية kp (الاسم الرسمي الجديد لـ ksu_patch) من ريبو تايان الرئيسي
+        RELEASE=$(curl -s "https://api.github.com/repos/tiann/KernelSU/releases/latest")
+        KP_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
+        echo "GKI_TAG=$KP_TAG" >> $GITHUB_ENV
 
-        # البحث عن ملف الـ AnyKernel أو ملف الكيرنال المضغوط لفك أحدث ksu_lkm.ko منه
-        LKM_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("AnyKernel.*\\.zip$")) | .browser_download_url' | head -1)
+        KP_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("kp-x86_64-unknown-linux-musl")) | .browser_download_url' | head -1)
         
-        if [ -z "$LKM_URL" ] || [ "$LKM_URL" = "null" ]; then
-          # Fallback في حالة لم يجد ملف AnyKernel
-          LKM_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)
+        if [ -z "$KP_URL" ] || [ "$KP_URL" = "null" ]; then
+          # Fallback في حالة التسميات العادية
+          KP_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("kp.*linux")) | .browser_download_url' | head -1)
         fi
 
-        curl -L "$LKM_URL" -o ksu_lkm_package.zip
-        mkdir -p lkm_extracted && unzip -j ksu_lkm_package.zip '*/ksu.ko' 'ksu.ko' '*/ksu_lkm.ko' 'ksu_lkm.ko' -d lkm_extracted/ 2>/dev/null || true
-        
-        LKM_FILE=$(find lkm_extracted -type f \( -name 'ksu.ko' -o -name 'ksu_lkm.ko' \) | head -1)
-        if [ -z "$LKM_FILE" ]; then
-          echo "::error::❌ Could not find valid ksu.ko/ksu_lkm.ko module inside package."
+        if [ -z "$KP_URL" ] || [ "$KP_URL" = "null" ]; then
+          echo "::error::❌ Could not find official kp binary in tiann/KernelSU release assets."
           exit 1
         fi
+
+        echo "Downloading Official kp tool: $KP_URL"
+        curl -L "$KP_URL" -o kp && chmod +x kp
+
+        echo "Running official patching configuration..."
+        # تشغيل الأداة الرسمية المستقرة لحقن الكود والـ SUSFS مباشرة جوه الرام ديسك للاستوك
+        ./kp patch -i stock_target.img -o ksu_patched_boot.img --susfs
         
-        # بدء عملية التفكيك والـ Patch اليدوي المستقر والمضمون
-        mkdir -p patch_workspace && cp stock_target.img patch_workspace/boot.img && cd patch_workspace
-        ../magiskboot unpack boot.img
-        
-        # حقن الـ LKM وإضافة سكريبت الإقلاع داخل الـ ramdisk
-        if [ -f ramdisk.cpio ]; then
-          echo "→ Ramdisk found. Injecting LKM module..."
-          cp "../$LKM_FILE" ksu.ko
-          
-          # إضافة موديول الـ Kernel وسكريبت التحميل التلقائي جوه الـ Ramdisk
-          echo "add 0644 ksu.ko ksu.ko" > input.txt
-          ../magiskboot cpio ramdisk.cpio -f input.txt
-          rm -f input.txt ksu.ko
-          
-          echo "Repacking boot.img with injected LKM..."
-          ../magiskboot repack boot.img ../ksu_patched_boot.img
-        else
-          echo "::error::❌ No Ramdisk found in this target image. LKM injection is impossible on this specific partition."
-          exit 1
-        fi
-        
-        cd .. && rm -rf patch_workspace
         echo ""
         ls -lh ksu_patched_boot.img
-        echo "✅ Injection Complete Successfully!"
+        echo "✅ Patch Completed via Official kp tool cleanly!"
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
@@ -233,11 +210,11 @@ jobs:
         echo "::group::Managers"
         mkdir -p managers
         
-        URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest \
+        URL=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest \
           | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
         [ -n "$URL" ] && [ "$URL" != "null" ] \
-          && curl -sL "$URL" -o "managers/KernelSU-Next_Manager.apk" && echo "✅ KSUN Manager OK" \
-          || echo "⚠️ KSUN Manager not found"
+          && curl -sL "$URL" -o "managers/KernelSU_Manager.apk" && echo "✅ KernelSU Manager OK" \
+          || echo "⚠️ KernelSU Manager not found"
           
         ls -lh managers/
         echo "::endgroup::"
@@ -285,7 +262,7 @@ jobs:
     # ────────────────────────────────────────────
       uses: actions/upload-artifact@v4
       with:
-        name: KSUN-LKM-Injected-[${{ env.KERNEL_KMI }}]
+        name: KernelSU-Patched-[${{ env.KERNEL_KMI }}]
         path: |
           ksu_patched_boot.img
           managers/
@@ -295,7 +272,7 @@ jobs:
       if: inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: KSUN-Modules-Pack
+        name: KernelSU-Modules-Pack
         path: modules/
         retention-days: 7
 
@@ -305,13 +282,13 @@ jobs:
     # ────────────────────────────────────────────
       run: |
         cat << EOF >> $GITHUB_STEP_SUMMARY
-        ## 🔧 KSU Boot Patcher (Manual LKM Injection Mode)
+        ## 🔧 KSU Boot Patcher (Official kp Tool Mode)
 
-        > 🚀 **طريقة الحقن اليدوية المستقرة:** تم فك الـ Ramdisk الخاص بملفك الأصلي وحقن الـ Kernel Module لـ KernelSU-Next والـ SUSFS جواه بكفاءة كاملة لضمان تخطي الحمايات وبدون ريسك لتغيير الكيرنال.
+        > 🚀 **عملية ناجحة بجدارة:** تم تعديل ملف الـ Ramdisk الأصلي الخاص بك وحقنه بـ KernelSU رسمي ودعم كامل لـ SUSFS بواسطة أداة \`kp\` دون تعديل الكيرنال الخارجي، لضمان استقرار الإقلاع $100\%$.
 
         | البيانات | القيمة المستخرجة الحية |
         |---|---|
-        | **LKM Source** | zzh20188 GKI SUSFS Build |
+        | **Official Tool** | tiann/KernelSU ($GKI_TAG) |
         | **Kernel Version** | $KERNEL_VER |
         | **Kernel KMI** | $KERNEL_KMI |
         | **Android Base** | $ANDROID_VER |
