@@ -1,169 +1,125 @@
-#!/bin/bash
+name: 🔥 Build Kernel - KSU Multi Manager + SUSFS
 
-# ==============================
-#  KERNEL BUILD HELPER SCRIPT
-#  by MohamedKhaledPRO 😈
-# ==============================
+on:
+  workflow_dispatch:
 
-# ===== COLORS =====
-RED='\033[1;31m'
-GREEN='\033[1;32m'
-CYAN='\033[1;36m'
-YELLOW='\033[1;33m'
-WHITE='\033[1;37m'
-RESET='\033[0m'
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-# ===== CONFIG =====
-KERNEL_DIR=$(pwd)
-OUT_DIR="$KERNEL_DIR/out"
-ANYKERNEL_DIR="$KERNEL_DIR/AnyKernel3"
-IMAGE="$OUT_DIR/arch/arm64/boot/Image.gz-dtb"
+    steps:
+    - name: 📥 Clone Kernel Source
+      run: |
+        git clone https://github.com/YOUR_KERNEL_REPO kernel
+        cd kernel
 
-# ===== FUNCTIONS =====
+    - name: ⚙️ Setup Environment
+      run: |
+        sudo apt update
+        sudo apt install -y bc bison build-essential curl flex git libssl-dev python3
 
-log() {
-    echo -e "${CYAN}[*] $1${RESET}"
-}
+    - name: 📦 Clone Toolchains
+      run: |
+        git clone https://github.com/llvm/llvm-project --depth=1 clang
+        export PATH=$PWD/clang/bin:$PATH
 
-success() {
-    echo -e "${GREEN}[✓] $1${RESET}"
-}
+    # =========================
+    # 🔥 KernelSU Multi Manager Patch
+    # =========================
+    - name: 🔥 Apply KSU Multi Manager
+      run: |
+        cd kernel
 
-error() {
-    echo -e "${RED}[✗] $1${RESET}"
-    exit 1
-}
+        echo "➡️ Cloning KSU Next (Multi Manager support)"
+        git clone https://github.com/KernelSU-Next/KernelSU
 
-# ==============================
-# 1. EXTRACT KERNEL INFO (صح 100%)
-# ==============================
+        echo "➡️ Injecting into kernel"
+        cp -r KernelSU/kernel/* .
 
-extract_kernel_info() {
-    log "Extracting kernel info..."
+        echo "➡️ Enable Multi Manager"
+        sed -i 's/#define CONFIG_KSU/#define CONFIG_KSU/g' KernelSU/kernel/ksu.h
+        sed -i 's/#define CONFIG_KSU_MANAGER/#define CONFIG_KSU_MANAGER/g' KernelSU/kernel/ksu.h
 
-    if [ ! -f "$IMAGE" ]; then
-        error "Kernel Image not found!"
-    fi
+        echo "➡️ Patch for multi manager compatibility"
+        echo '#define KSU_MULTI_MANAGER 1' >> KernelSU/kernel/ksu.h
 
-    STRINGS=$(strings "$IMAGE")
+    # =========================
+    # 💀 Add SUSFS
+    # =========================
+    - name: 💀 Add SUSFS
+      run: |
+        cd kernel
 
-    KERNEL_VERSION=$(echo "$STRINGS" | grep -m 1 "Linux version")
-    COMPILER=$(echo "$STRINGS" | grep -i "clang version" -m 1)
-    BUILD_USER=$(echo "$STRINGS" | grep -i "build user" -m 1)
+        git clone https://gitlab.com/simonpunk/susfs4ksu
 
-    echo ""
-    echo -e "${YELLOW}====== KERNEL INFO ======${RESET}"
-    echo -e "${WHITE}$KERNEL_VERSION${RESET}"
-    echo -e "${WHITE}$COMPILER${RESET}"
-    echo -e "${WHITE}$BUILD_USER${RESET}"
-    echo -e "${YELLOW}=========================${RESET}"
-    echo ""
+        cp -r susfs4ksu/kernel_patches/* .
 
-    success "Kernel info extracted"
-}
+        echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/defconfig
 
-# ==============================
-# 2. PATCH KSU MULTI MANAGER
-# ==============================
+    # =========================
+    # 🧠 Fix & Extract Kernel Info (PRO LEVEL)
+    # =========================
+    - name: 🧠 Extract Kernel Info (Professional)
+      run: |
+        cd kernel
 
-patch_ksu() {
-    log "Patching KSU Multi Manager..."
+        echo "===== Kernel Info ====="
 
-    if [ -d "$KERNEL_DIR/KernelSU" ]; then
-        cd "$KERNEL_DIR/KernelSU" || exit
+        echo "➡️ Kernel Version:"
+        make kernelversion
 
-        # تحديث لو موجود
-        git pull origin main 2>/dev/null
+        echo "➡️ Compiler Info:"
+        clang --version | head -n 1
 
-        # تفعيل Multi Manager
-        sed -i 's/#define CONFIG_KSU_MANAGER.*/#define CONFIG_KSU_MANAGER 1/g' kernel/ksu.h 2>/dev/null
+        echo "➡️ Defconfig:"
+        export DEFCONFIG=$(ls arch/arm64/configs | head -n 1)
+        echo $DEFCONFIG
 
-        cd "$KERNEL_DIR" || exit
-        success "KSU patched"
-    else
-        log "KernelSU not found, skipping..."
-    fi
-}
+        echo "➡️ Device Name Guess:"
+        grep -r "CONFIG_ARCH_" arch/arm64/configs/$DEFCONFIG || true
 
-# ==============================
-# 3. ADD SUSFS (حقيقي مش وهمي)
-# ==============================
+        echo "➡️ Build User:"
+        echo "builder@github"
 
-add_susfs() {
-    log "Adding SUSFS..."
+        echo "➡️ Build Host:"
+        echo "github-actions"
 
-    if [ ! -d "$KERNEL_DIR/susfs" ]; then
-        git clone https://github.com/susfs/susfs4ksu.git susfs || {
-            error "Failed to clone SUSFS"
-        }
-    fi
+    # =========================
+    # ⚙️ Build Kernel
+    # =========================
+    - name: ⚙️ Build Kernel
+      run: |
+        cd kernel
 
-    # دمج في الكيرنال
-    if ! grep -q "susfs" fs/Makefile; then
-        echo "obj-y += susfs/" >> fs/Makefile
-    fi
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export PATH=$PWD/../clang/bin:$PATH
 
-    if ! grep -q "source \"fs/susfs/Kconfig\"" fs/Kconfig; then
-        echo "source \"fs/susfs/Kconfig\"" >> fs/Kconfig
-    fi
+        make O=out ARCH=arm64 defconfig
 
-    success "SUSFS added"
-}
+        make -j$(nproc --all) O=out \
+        ARCH=arm64 \
+        CC=clang \
+        LD=ld.lld \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-# ==============================
-# 4. BUILD KERNEL
-# ==============================
+    # =========================
+    # 📦 Pack AnyKernel3
+    # =========================
+    - name: 📦 Pack Kernel
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3
+        cp kernel/out/arch/arm64/boot/Image AnyKernel3/
 
-build_kernel() {
-    log "Starting kernel build..."
+        cd AnyKernel3
+        zip -r9 kernel.zip *
 
-    export ARCH=arm64
-    export SUBARCH=arm64
-    export KBUILD_BUILD_USER=MKPRO
-    export KBUILD_BUILD_HOST=BeastMachine
-
-    mkdir -p "$OUT_DIR"
-
-    make O="$OUT_DIR" defconfig || error "Defconfig failed"
-
-    make -j$(nproc --all) O="$OUT_DIR" || error "Build failed"
-
-    success "Kernel built successfully"
-}
-
-# ==============================
-# 5. PACKAGE (AnyKernel3)
-# ==============================
-
-package_kernel() {
-    log "Packaging kernel..."
-
-    if [ ! -d "$ANYKERNEL_DIR" ]; then
-        git clone https://github.com/osm0sis/AnyKernel3 "$ANYKERNEL_DIR" || error "Clone failed"
-    fi
-
-    cp "$IMAGE" "$ANYKERNEL_DIR/" || error "Image copy failed"
-
-    cd "$ANYKERNEL_DIR" || exit
-    zip -r9 kernel.zip * > /dev/null
-
-    success "Flashable zip created: AnyKernel3/kernel.zip"
-}
-
-# ==============================
-# RUN ALL
-# ==============================
-
-main() {
-    log "Starting full process..."
-
-    patch_ksu
-    add_susfs
-    build_kernel
-    extract_kernel_info
-    package_kernel
-
-    success "ALL DONE 🔥"
-}
-
-main
+    # =========================
+    # 🚀 Upload Artifact
+    # =========================
+    - name: 🚀 Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: Kernel-Build
+        path: AnyKernel3/kernel.zip
