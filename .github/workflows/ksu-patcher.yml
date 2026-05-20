@@ -180,30 +180,30 @@ jobs:
           TARGET_FILE="$KERNEL_FILE"
         fi
 
+        # 1. لقط سطر الـ Linux version بالكامل
         KERNEL_FULL=$(strings "$TARGET_FILE" | grep -E "Linux version [0-9]+\.[0-9]+" | head -1)
         
         if [ -z "$KERNEL_FULL" ]; then
-          KERNEL_FULL=$(strings "$TARGET_FILE" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+-android[0-9]+" | head -1)
+          KERNEL_FULL=$(strings "$TARGET_FILE" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+-android[0-9]+-[0-9]+" | head -1)
         fi
 
         echo "Full Line Detected: $KERNEL_FULL"
 
-        KERNEL_VER=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-        KERNEL_KMI=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+-android[0-9]+" | head -1)
+        # 2. استخراج النسخة القصيرة (مثال: 6.12 أو 5.10)
+        KSHORT=$(echo "$KERNEL_FULL" | grep -oE "Linux version [0-9]+\.[0-9]+" | awk '{print $3}' || echo "")
+        [ -z "$KSHORT" ] && KSHORT=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+" | head -1)
+
+        # 3. استخراج نسخة الأندرويد (مثال: android16 أو android12)
         ANDROID_VER=$(echo "$KERNEL_FULL" | grep -oE "android[0-9]+" | head -1)
-        KSHORT=$(echo "$KERNEL_VER" | cut -d. -f1,2)
 
-        if [ -z "$KERNEL_KMI" ]; then
-           [ -z "$KSHORT" ] && KSHORT=$(strings "$TARGET_FILE" | grep -oE "[0-9]+\.[0-9]+" | head -1)
-           [ -z "$ANDROID_VER" ] && ANDROID_VER=$(strings "$TARGET_FILE" | grep -oE "android[0-9]+" | head -1)
-           if [ -n "$KSHORT" ] && [ -n "$ANDROID_VER" ]; then
-              KERNEL_KMI="${KSHORT}-${ANDROID_VER}"
-           else
-              KERNEL_KMI="unknown"
-           fi
-        fi
+        # 4. بناء الـ KMI الحقيقي المعتمد في ريبوهات الـ GKI
+        KERNEL_KMI="${KSHORT}-${ANDROID_VER}"
 
-        # جدار الحماية (GKI Safety Gate)
+        # استخراج الـ KMI التفصيلي بالرقم الفرعي لو موجود (مثال: 6.12.30-android16-5)
+        KERNEL_KMI_FULL=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+-android[0-9]+-[0-9]+" | head -1)
+        [ -z "$KERNEL_KMI_FULL" ] && KERNEL_KMI_FULL=$KERNEL_KMI
+
+        # جدار الحماية (GKI Safety Gate) لضمان عدم تمرير كيرنال قديم
         MAJOR=$(echo "$KSHORT" | cut -d. -f1)
         MINOR=$(echo "$KSHORT" | cut -d. -f2)
         
@@ -219,17 +219,18 @@ jobs:
 
         echo "📊 Final Extraction Results:"
         echo "============================="
-        echo "KMI Version  : $KERNEL_KMI"
         echo "Short Version: $KSHORT"
         echo "Android Ver  : $ANDROID_VER"
+        echo "GKI KMI Base : $KERNEL_KMI"
+        echo "Full KMI Spec: $KERNEL_KMI_FULL"
         echo "============================="
 
-        echo "KERNEL_FULL=$KERNEL_FULL"   >> $GITHUB_ENV
-        echo "KERNEL_VER=$KERNEL_VER"     >> $GITHUB_ENV
-        echo "KERNEL_KMI=$KERNEL_KMI"     >> $GITHUB_ENV
-        echo "ANDROID_VER=$ANDROID_VER"   >> $GITHUB_ENV
-        echo "KSHORT=$KSHORT"             >> $GITHUB_ENV
-        echo "KERNEL_FILE=$KERNEL_FILE"   >> $GITHUB_ENV
+        echo "KERNEL_FULL=$KERNEL_FULL"       >> $GITHUB_ENV
+        echo "KERNEL_KMI=$KERNEL_KMI"         >> $GITHUB_ENV
+        echo "KERNEL_KMI_FULL=$KERNEL_KMI_FULL" >> $GITHUB_ENV
+        echo "ANDROID_VER=$ANDROID_VER"       >> $GITHUB_ENV
+        echo "KSHORT=$KSHORT"                 >> $GITHUB_ENV
+        echo "KERNEL_FILE=$KERNEL_FILE"       >> $GITHUB_ENV
 
         set -e
         echo "::endgroup::"
@@ -278,15 +279,12 @@ jobs:
         echo "Release : $GKI_TAG"
         echo ""
 
-        ASSET_IS_ZIP=false
         IMG_URL=""
 
-        if [ -n "$KERNEL_KMI" ] && [ "$KERNEL_KMI" != "unknown" ]; then
-          ANDROID_PART=$(echo "$KERNEL_KMI" | grep -oP 'android[0-9]+')
-          KVER_PART=$(echo "$KERNEL_KMI"    | grep -oP '^[0-9]+\.[0-9]+')
-
+        # محاولة البحث بالـ KMI الذكي (وجود نسخة الكيرنال والاندرويد معاً في اسم الملف)
+        if [ -n "$KSHORT" ] && [ -n "$ANDROID_VER" ]; then
           IMG_URL=$(echo "$RELEASE" | jq -r \
-            --arg a "$ANDROID_PART" --arg k "$KVER_PART" '
+            --arg a "$ANDROID_VER" --arg k "$KSHORT" '
             .assets[]
             | select(
                 (.name | contains($a)) and
@@ -296,8 +294,9 @@ jobs:
             | .browser_download_url' | head -1 || true)
         fi
 
+        # محاولة ثانية بالنسخة القصيرة فقط لو المطور مش كاتب اسم نظام الأندرويد في الـ Zip
         if [ -z "$IMG_URL" ] || [ "$IMG_URL" = "null" ]; then
-          echo "Pass 1 failed → trying short version: $KSHORT"
+          echo "Pass 1 failed → trying short version match: $KSHORT"
           IMG_URL=$(echo "$RELEASE" | jq -r --arg k "$KSHORT" '
             .assets[]
             | select(
@@ -307,21 +306,20 @@ jobs:
             | .browser_download_url' | head -1 || true)
         fi
 
+        # محاولة أخيرة (Fallback) لأي ملف AnyKernel3 موجود
         if [ -z "$IMG_URL" ] || [ "$IMG_URL" = "null" ]; then
-          echo "Pass 2 failed → fallback to any AnyKernel zip"
+          echo "Pass 2 failed → fallback to first AnyKernel zip found"
           IMG_URL=$(echo "$RELEASE" | jq -r '
             .assets[]
             | select(.name | test("AnyKernel.*\\.zip$"))
             | .browser_download_url' | head -1 || true)
-          ASSET_IS_ZIP=true
         fi
 
         if [ -z "$IMG_URL" ] || [ "$IMG_URL" = "null" ]; then
-          echo "::error::No GKI image found for $KERNEL_KMI"
+          echo "::error::❌ No matching GKI kernel image found in the repository for $KSHORT ($ANDROID_VER)"
           exit 1
         fi
 
-        echo "ASSET_IS_ZIP=$ASSET_IS_ZIP" >> $GITHUB_ENV
         echo "IMG_URL=$IMG_URL"           >> $GITHUB_ENV
         echo "✅ Selected Asset: $(basename $IMG_URL)"
         set -e
@@ -338,31 +336,45 @@ jobs:
 
         mkdir -p extracted_gki
 
-        if [ "$ASSET_IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
-          unzip -j gki_asset 'Image'    -d extracted_gki/ 2>/dev/null || \
-          unzip -j gki_asset '*/Image'  -d extracted_gki/ 2>/dev/null || \
-          unzip -j gki_asset 'Image.gz' -d extracted_gki/ 2>/dev/null || {
-            echo "::error::Failed to extract Image from GKI Asset"
+        # فحص حقيقي لنوع الملف بغض النظر عن المتغيرات السابقة
+        if file gki_asset | grep -qi 'zip\|archive'; then
+          echo "→ GKI Asset is a ZIP archive (AnyKernel3 format detected)"
+          
+          # محاولة استخراج الكيرنال بكافة مسمياته الشائعة عند المطورين
+          unzip -j gki_asset 'Image'       -d extracted_gki/ 2>/dev/null || \
+          unzip -j gki_asset '*/Image'     -d extracted_gki/ 2>/dev/null || \
+          unzip -j gki_asset 'kernel'      -d extracted_gki/ 2>/dev/null || \
+          unzip -j gki_asset 'Image.gz*'   -d extracted_gki/ 2>/dev/null || {
+            echo "::error::❌ Failed to find a valid Kernel Image inside the AnyKernel3 ZIP"
             exit 1
           }
-          GKI_IMAGE=$(find extracted_gki -name 'Image*' | head -1)
+          GKI_IMAGE=$(find extracted_gki -type f \( -name 'Image*' -o -name 'kernel' \) | head -1)
         else
+          echo "→ GKI Asset is a raw/direct binary image"
           cp gki_asset extracted_gki/Image
           GKI_IMAGE=extracted_gki/Image
         fi
 
+        echo "Selected GKI Kernel Binary: $GKI_IMAGE"
+
+        # فك ضغط الكيرنال المجلوب لو كان مضغوطاً لحقنه صافي
         if file "$GKI_IMAGE" | grep -qi 'gzip'; then
+          echo "→ Decompressing downloaded GKI kernel (GZIP detected)..."
           gunzip -c "$GKI_IMAGE" > extracted_gki/Image_raw
           GKI_IMAGE=extracted_gki/Image_raw
         fi
 
         cd workspace
+        # استبدال الكيرنال القديم بالجديد مع الحفاظ على نفس الاسم الأصلي للـ Boot
         cp "../$GKI_IMAGE" "$(basename $KERNEL_FILE)"
+        
+        echo "Repacking boot.img..."
         ../magiskboot repack boot.img ../ksu_patched_boot.img
         cd ..
 
+        echo ""
         ls -lh ksu_patched_boot.img
-        echo "✅ Replacement Complete"
+        echo "✅ Replacement & Repack Complete"
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
@@ -461,9 +473,9 @@ jobs:
         |---|---|
         | GKI Source | `${{ inputs.gki_source }}` |
         | GKI Version | `$GKI_TAG` |
-        | Kernel KMI | `$KERNEL_KMI` |
-        | Kernel Full | `$KERNEL_FULL` |
-        | Android | `$ANDROID_VER` |
+        | Kernel KMI Base | `$KERNEL_KMI` |
+        | Kernel Full Spec | `$KERNEL_KMI_FULL` |
+        | Android Version | `$ANDROID_VER` |
 
         ### Flash
         ```bash
