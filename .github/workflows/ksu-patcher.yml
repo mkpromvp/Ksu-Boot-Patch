@@ -1,359 +1,376 @@
-name: 🔧 KSU Boot Patcher (No Magisk / SUSFS)
+name: 🔧 KSU Boot Patcher — Multi Manager + SUSFS
+
+# ══════════════════════════════════════════════
+# الفكرة:
+#   بتحط رابط boot.img الاستوك
+#   الـ workflow يجيب GKI Image مبني بـ SUSFS ومتوافق مع أكتر من Manager
+#   يحط الـ Image الجديد في boot.img ويرفعه كـ artifact
+#   تقدر تثبت أي Manager عايزه: WKSU أو KSU-Next أو SukiSU
+# ══════════════════════════════════════════════
 
 on:
   workflow_dispatch:
     inputs:
 
       boot_img_url:
-        description: '🔗 رابط boot.img (Direct Download Link)'
+        description: '🔗 رابط boot.img الاستوك (Direct Link)'
         required: true
         type: string
 
-      ksu_variant:
-        description: '📦 KSU Manager — (SUSFS متاح في Next و SukiSU فقط)'
+      gki_source:
+        description: '📦 مصدر الـ GKI Kernel (كلهم SUSFS + Multi Manager)'
         required: true
-        default: 'SukiSU-Ultra'
+        default: 'WildKernels (WKSU + KSUN)'
         type: choice
         options:
-          - KernelSU-Next
-          - SukiSU-Ultra
-          - KernelSU
-
-      ksu_version:
-        description: '📌 إصدار KSU (اتركه فاضي = أحدث إصدار)'
-        required: false
-        type: string
-
-      multi_manager:
-        description: '🔀 Multi Manager — ZygiskNext + Shamiko'
-        required: false
-        type: boolean
-        default: false
+          - 'WildKernels (WKSU + KSUN)'
+          - 'zzh20188 (SukiSU + MKSU + KSUN + ReSukiSU)'
+          - 'KernelSU-Next (KSUN فقط)'
 
       include_susfs_module:
-        description: '🛡 تضمين SUSFS userspace module (للـ Next و SukiSU فقط)'
+        description: '🛡 تحميل SUSFS userspace module'
         required: false
         type: boolean
         default: true
 
-      include_lsposed:
-        description: '🧩 تضمين LSPosed'
+      include_zygisk:
+        description: '🔀 تحميل ZygiskNext + Shamiko'
         required: false
         type: boolean
         default: false
 
-# ══════════════════════════════════════════════════════
+      include_lsposed:
+        description: '🧩 تحميل LSPosed'
+        required: false
+        type: boolean
+        default: false
+
+# ══════════════════════════════════════════════
 jobs:
-  patch-boot:
+  patch:
     runs-on: ubuntu-latest
 
     steps:
 
-    # ────────────────────────────────────────────────────
-    - name: 🔍 Validate — SUSFS Warning for KernelSU Official
-    # ────────────────────────────────────────────────────
-      if: inputs.ksu_variant == 'KernelSU' && inputs.include_susfs_module == 'true'
+    # ─────────────────────────────────────────
+    - name: 📥 تحميل boot.img
+    # ─────────────────────────────────────────
       run: |
-        echo "::warning::⚠️ KernelSU (official) prebuilts لا تدعم SUSFS بشكل رسمي."
-        echo "::warning::   استخدم KernelSU-Next أو SukiSU-Ultra للحصول على SUSFS كامل."
-
-    # ────────────────────────────────────────────────────
-    - name: 📥 Download boot.img
-    # ────────────────────────────────────────────────────
-      run: |
-        echo "::group::Downloading boot.img"
+        echo "::group::Download boot.img"
         curl -L --progress-bar "${{ inputs.boot_img_url }}" -o boot.img
         echo ""
         ls -lh boot.img
         file boot.img
         echo "::endgroup::"
 
-    # ────────────────────────────────────────────────────
-    - name: 🔧 Install Tools (No Magisk)
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
+    - name: 🔧 تجهيز magiskboot (أداة فك/تركيب فقط — مش Magisk root)
+    # ─────────────────────────────────────────
       run: |
-        echo "::group::Installing unpack tools"
-        sudo apt-get update -qq
-        sudo apt-get install -y python3-pip lz4 xz-utils cpio file jq
-        # AOSP mkbootimg tools — بديل magiskboot خالص
-        pip install mkbootimg --quiet
-        echo "✅ mkbootimg (AOSP) installed"
+        echo "::group::Setup magiskboot"
+        MAGISK_APK=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+          | jq -r '.assets[] | select(.name | test("Magisk-v[0-9]")) | .browser_download_url' \
+          | head -1)
+        curl -sL "$MAGISK_APK" -o magisk.apk
+        unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
+        mv libmagiskboot.so magiskboot
+        chmod +x magiskboot
         echo "::endgroup::"
 
-    # ────────────────────────────────────────────────────
-    - name: 📦 Set KSU Repo
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
+    - name: 🔍 استخراج معلومات الكيرنال
+    # ─────────────────────────────────────────
       run: |
-        case "${{ inputs.ksu_variant }}" in
-          "KernelSU")       echo "KSU_REPO=tiann/KernelSU"                   >> $GITHUB_ENV ;;
-          "KernelSU-Next")  echo "KSU_REPO=KernelSU-Next/KernelSU-Next"      >> $GITHUB_ENV ;;
-          "SukiSU-Ultra")   echo "KSU_REPO=SukiSU-Ultra/SukiSU-Ultra"        >> $GITHUB_ENV ;;
+        echo "::group::Detect kernel version"
+
+        mkdir -p workspace
+        cp boot.img workspace/
+        cd workspace
+        ../magiskboot unpack boot.img 2>&1 | head -20
+        echo ""
+
+        # استخراج KMI (الجزء المهم للمطابقة)
+        KERNEL_FULL=$(strings kernel | grep -oP 'Linux version \K[^\s]+' | head -1)
+        KERNEL_VER=$(echo "$KERNEL_FULL"  | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+')
+        KERNEL_KMI=$(echo "$KERNEL_FULL"  | grep -oP '^[0-9]+\.[0-9]+-android[0-9]+')
+        ANDROID_VER=$(echo "$KERNEL_FULL" | grep -oP 'android[0-9]+' | head -1)
+
+        # لو مش عارف يجيب KMI بالطريقة دي
+        if [ -z "$KERNEL_KMI" ]; then
+          KSHORT=$(echo "$KERNEL_VER" | grep -oP '^[0-9]+\.[0-9]+')
+          KERNEL_KMI="${KSHORT}-${ANDROID_VER}"
+        fi
+
+        echo "KERNEL_FULL=$KERNEL_FULL"   >> $GITHUB_ENV
+        echo "KERNEL_VER=$KERNEL_VER"     >> $GITHUB_ENV
+        echo "KERNEL_KMI=$KERNEL_KMI"     >> $GITHUB_ENV
+        echo "ANDROID_VER=$ANDROID_VER"   >> $GITHUB_ENV
+
+        echo "Full version : $KERNEL_FULL"
+        echo "KMI          : $KERNEL_KMI"
+        echo "Android      : $ANDROID_VER"
+        echo "::endgroup::"
+
+    # ─────────────────────────────────────────
+    - name: 📦 تحديد الـ Repo + Manager APKs
+    # ─────────────────────────────────────────
+      run: |
+        case "${{ inputs.gki_source }}" in
+          "WildKernels (WKSU + KSUN)")
+            echo "GKI_REPO=WildKernels/GKI_KernelSU_SUSFS"  >> $GITHUB_ENV
+            echo "GKI_LABEL=WildKernels"                     >> $GITHUB_ENV
+            # Managers اللي بيشتغلوا مع الكيرنال ده
+            echo "MGR1_REPO=WildKernels/Wild_KSU"            >> $GITHUB_ENV
+            echo "MGR1_NAME=WildKSU_Manager"                 >> $GITHUB_ENV
+            echo "MGR2_REPO=KernelSU-Next/KernelSU-Next"    >> $GITHUB_ENV
+            echo "MGR2_NAME=KernelSU-Next_Manager"           >> $GITHUB_ENV
+            ;;
+          "zzh20188 (SukiSU + MKSU + KSUN + ReSukiSU)")
+            echo "GKI_REPO=zzh20188/GKI_KernelSU_SUSFS"     >> $GITHUB_ENV
+            echo "GKI_LABEL=zzh20188"                        >> $GITHUB_ENV
+            echo "MGR1_REPO=SukiSU-Ultra/SukiSU-Ultra"      >> $GITHUB_ENV
+            echo "MGR1_NAME=SukiSU_Manager"                  >> $GITHUB_ENV
+            echo "MGR2_REPO=KernelSU-Next/KernelSU-Next"    >> $GITHUB_ENV
+            echo "MGR2_NAME=KernelSU-Next_Manager"           >> $GITHUB_ENV
+            ;;
+          "KernelSU-Next (KSUN فقط)")
+            echo "GKI_REPO=KernelSU-Next/KernelSU-Next"     >> $GITHUB_ENV
+            echo "GKI_LABEL=KSU-Next"                        >> $GITHUB_ENV
+            echo "MGR1_REPO=KernelSU-Next/KernelSU-Next"    >> $GITHUB_ENV
+            echo "MGR1_NAME=KernelSU-Next_Manager"           >> $GITHUB_ENV
+            echo "MGR2_REPO="                                 >> $GITHUB_ENV
+            echo "MGR2_NAME="                                 >> $GITHUB_ENV
+            ;;
         esac
 
-    # ────────────────────────────────────────────────────
-    - name: 📥 Fetch KSU Release
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
+    - name: 📥 تحميل GKI Image المتوافق
+    # ─────────────────────────────────────────
       run: |
-        echo "::group::Fetching ${{ inputs.ksu_variant }} release"
+        echo "::group::Find matching GKI Image from $GKI_REPO"
 
-        if [ -n "${{ inputs.ksu_version }}" ]; then
-          API="https://api.github.com/repos/$KSU_REPO/releases/tags/${{ inputs.ksu_version }}"
-        else
-          API="https://api.github.com/repos/$KSU_REPO/releases/latest"
-        fi
+        RELEASE=$(curl -s "https://api.github.com/repos/$GKI_REPO/releases/latest")
+        GKI_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
+        echo "GKI_TAG=$GKI_TAG" >> $GITHUB_ENV
+        echo "Release: $GKI_TAG"
 
-        RELEASE=$(curl -sf "$API")
-        if [ -z "$RELEASE" ]; then
-          echo "::error::فشل تحميل الـ release — تأكد من الإصدار أو الـ repo"
-          exit 1
-        fi
-
-        KSU_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
-        echo "KSU_TAG=$KSU_TAG" >> $GITHUB_ENV
-        echo "Release: $KSU_TAG"
-
-        # ── ksud x86_64 Linux (الأداة الرئيسية — بديل magiskboot) ──
-        KSUD_URL=$(echo "$RELEASE" | jq -r '
+        # ── محاولة 1: مطابقة KMI كاملة (مثلاً android15-6.6) ──
+        IMG_URL=$(echo "$RELEASE" | jq -r --arg kmi "$KERNEL_KMI" '
           .assets[]
-          | select(.name | test("x86_64.*(linux|musl)"; "i"))
+          | select(
+              (.name | contains($kmi)) and
+              (.name | test("Image$|Image\\.gz|-Image|-boot"))
+            )
           | .browser_download_url' | head -1)
 
-        if [ -z "$KSUD_URL" ]; then
-          # محاولة ثانية باسم مختلف
-          KSUD_URL=$(echo "$RELEASE" | jq -r '
-            .assets[]
-            | select(.name | test("ksud.*linux|linux.*ksud"; "i"))
-            | .browser_download_url' | head -1)
-        fi
-
-        if [ -n "$KSUD_URL" ]; then
-          echo "Downloading ksud: $KSUD_URL"
-          curl -sL "$KSUD_URL" -o ksud
-          chmod +x ksud
-          ./ksud --version 2>/dev/null && echo "✅ ksud ready" || true
-          echo "HAVE_KSUD=true" >> $GITHUB_ENV
-        else
-          echo "::warning::ksud x86_64 binary غير موجود في الـ release"
-          echo "HAVE_KSUD=false" >> $GITHUB_ENV
-        fi
-
-        # ── Manager APK ──
-        APK_URL=$(echo "$RELEASE" | jq -r '
-          .assets[]
-          | select(.name | endswith(".apk"))
-          | .browser_download_url' | head -1)
-
-        if [ -n "$APK_URL" ]; then
-          curl -sL "$APK_URL" -o "KSUManager_${{ inputs.ksu_variant }}.apk"
-          echo "✅ Manager APK: $(ls -lh KSUManager_*.apk | awk '{print $5, $9}')"
-        fi
-
-        echo "::endgroup::"
-
-    # ────────────────────────────────────────────────────
-    - name: ⚡ Patch boot.img — ksud only (No Magisk)
-    # ────────────────────────────────────────────────────
-      run: |
-        echo "::group::Patching with ksud"
-
-        if [ "$HAVE_KSUD" = "true" ]; then
-          # الطريقة المثالية: ksud boot-patch مباشر
-          echo "Using: ksud boot-patch"
-          ./ksud boot-patch -b boot.img -o ksu_patched_boot.img
-
-        else
-          # Fallback بدون magiskboot: unpack_bootimg (AOSP) + GKI prebuilt
-          echo "⚠️ Falling back to AOSP unpack_bootimg"
-
-          # فك الـ boot.img
-          mkdir -p bootimg_unpacked
-          unpack_bootimg --boot_img boot.img --out bootimg_unpacked/
-
-          # اعرف إصدار الكيرنال من ملف kernel
-          KERNEL_FILE=$(find bootimg_unpacked -name 'kernel' | head -1)
-          if [ -z "$KERNEL_FILE" ]; then
-            echo "::error::مش لاقي ملف kernel جوا boot.img"
-            exit 1
-          fi
-
-          KERNEL_SHORT=$(strings "$KERNEL_FILE" | grep -oP 'Linux version \K[0-9]+\.[0-9]+' | head -1)
-          echo "Kernel version short: $KERNEL_SHORT"
-
-          # دور على GKI prebuilt من الـ release
-          RELEASE=$(curl -sf "https://api.github.com/repos/$KSU_REPO/releases/latest")
-          IMG_URL=$(echo "$RELEASE" | jq -r --arg k "$KERNEL_SHORT" '
+        # ── محاولة 2: رقم الكيرنال القصير (مثلاً 6.6) ──
+        if [ -z "$IMG_URL" ] || [ "$IMG_URL" = "null" ]; then
+          KSHORT=$(echo "$KERNEL_VER" | grep -oP '^[0-9]+\.[0-9]+')
+          echo "KMI match failed, trying short version: $KSHORT"
+          IMG_URL=$(echo "$RELEASE" | jq -r --arg k "$KSHORT" '
             .assets[]
             | select(
                 (.name | contains($k)) and
-                (.name | test("Image|\\.zip$"))
+                (.name | test("AnyKernel|Image|boot\\.img"))
               )
             | .browser_download_url' | head -1)
-
-          if [ -n "$IMG_URL" ]; then
-            curl -sL "$IMG_URL" -o gki_asset
-            if file gki_asset | grep -q 'Zip'; then
-              unzip -j gki_asset 'Image' -d bootimg_unpacked/ 2>/dev/null || \
-              unzip -j gki_asset '*/Image' -d bootimg_unpacked/ 2>/dev/null
-            else
-              mv gki_asset bootimg_unpacked/kernel
-            fi
-            echo "✅ Replaced kernel with KSU GKI prebuilt ($KERNEL_SHORT)"
-          else
-            echo "::error::مفيش GKI prebuilt لـ kernel $KERNEL_SHORT في الـ release"
-            echo "::error::جرب KernelSU-Next أو SukiSU-Ultra، أو حدّد إصدار KSU أحدث"
-            exit 1
-          fi
-
-          # إعادة تجميع boot.img
-          # اعرف معلومات الـ boot من الـ unpack output
-          CMDLINE=$(cat bootimg_unpacked/kernel_cmdline 2>/dev/null || true)
-          mkbootimg \
-            --kernel bootimg_unpacked/kernel \
-            --ramdisk bootimg_unpacked/ramdisk \
-            --output ksu_patched_boot.img \
-            ${CMDLINE:+--cmdline "$CMDLINE"} \
-            || {
-              echo "::error::فشلت إعادة التجميع — بيانات boot.img ناقصة"
-              exit 1
-            }
         fi
 
+        # ── محاولة 3: AnyKernel zip ──
+        if [ -z "$IMG_URL" ] || [ "$IMG_URL" = "null" ]; then
+          echo "Trying AnyKernel zip..."
+          IMG_URL=$(echo "$RELEASE" | jq -r --arg k "$KSHORT" '
+            .assets[]
+            | select(.name | test("AnyKernel.*\\.zip$|\\.zip$"))
+            | .browser_download_url' | head -1)
+          echo "ASSET_IS_ZIP=true" >> $GITHUB_ENV
+        fi
+
+        if [ -z "$IMG_URL" ] || [ "$IMG_URL" = "null" ]; then
+          echo "::error::❌ مفيش Image متوافق مع kernel $KERNEL_KMI في الـ release"
+          echo "::error::   الـ assets المتاحة:"
+          echo "$RELEASE" | jq -r '.assets[].name'
+          exit 1
+        fi
+
+        echo "IMG_URL=$IMG_URL" >> $GITHUB_ENV
+        echo "✅ Found: $IMG_URL"
+        echo "::endgroup::"
+
+    # ─────────────────────────────────────────
+    - name: ⚡ دمج الـ GKI Image في boot.img
+    # ─────────────────────────────────────────
+      run: |
+        echo "::group::Inject GKI Image"
+
+        curl -L --progress-bar "$IMG_URL" -o gki_asset
         echo ""
+        file gki_asset
+
+        # استخراج الـ Image
+        if [ "$ASSET_IS_ZIP" = "true" ] || file gki_asset | grep -q 'Zip'; then
+          echo "Extracting Image from zip..."
+          unzip -j gki_asset 'Image'    -d extracted/ 2>/dev/null || \
+          unzip -j gki_asset '*/Image'  -d extracted/ 2>/dev/null || \
+          unzip -j gki_asset 'Image.gz' -d extracted/ 2>/dev/null || {
+            echo "::error::فشل استخراج Image من الـ zip"
+            unzip -l gki_asset | head -20
+            exit 1
+          }
+          GKI_IMAGE=$(find extracted -name 'Image*' | head -1)
+        else
+          GKI_IMAGE=gki_asset
+        fi
+
+        echo "GKI Image: $(ls -lh $GKI_IMAGE)"
+
+        # استبدال الـ kernel في boot.img
+        cd workspace
+        cp "../$GKI_IMAGE" kernel
+
+        # لو Image مضغوط
+        if file "../$GKI_IMAGE" | grep -q 'gzip'; then
+          gunzip -c "../$GKI_IMAGE" > kernel
+        fi
+
+        # إعادة تجميع boot.img
+        ../magiskboot repack boot.img ../ksu_patched_boot.img
+
+        cd ..
         ls -lh ksu_patched_boot.img
         echo "✅ Patch done"
         echo "::endgroup::"
 
-    # ────────────────────────────────────────────────────
-    - name: 🛡 Download SUSFS Userspace Module
-      if: inputs.include_susfs_module == 'true' && inputs.ksu_variant != 'KernelSU'
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
+    - name: 📲 تحميل Manager APKs (المتوافقة مع الكيرنال)
+    # ─────────────────────────────────────────
+      run: |
+        echo "::group::Download Manager APKs"
+        mkdir -p managers
+
+        download_apk() {
+          local REPO="$1"
+          local NAME="$2"
+          if [ -z "$REPO" ]; then return; fi
+
+          APK_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" \
+            | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' \
+            | head -1)
+
+          if [ -n "$APK_URL" ] && [ "$APK_URL" != "null" ]; then
+            curl -sL "$APK_URL" -o "managers/${NAME}.apk"
+            echo "✅ $NAME"
+          else
+            echo "⚠️ $NAME — APK غير متاح"
+          fi
+        }
+
+        download_apk "$MGR1_REPO" "$MGR1_NAME"
+        download_apk "$MGR2_REPO" "$MGR2_NAME"
+
+        ls -lh managers/
+        echo "::endgroup::"
+
+    # ─────────────────────────────────────────
+    - name: 🛡 SUSFS Module (sidex15/ksu_module_susfs)
+      if: inputs.include_susfs_module == 'true'
+    # ─────────────────────────────────────────
       run: |
         echo "::group::SUSFS Module"
         mkdir -p modules
 
-        # susfs4ksu — الـ userspace companion لـ SUSFS kernel patch
-        SUSFS_REL=$(curl -s https://api.github.com/repos/sidex15/susfs4ksu-module/releases/latest 2>/dev/null)
+        SUSFS_REL=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest)
         SUSFS_URL=$(echo "$SUSFS_REL" | jq -r '
-          .assets[]
-          | select(.name | endswith(".zip"))
-          | .browser_download_url' | head -1)
+          .assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)
 
         if [ -n "$SUSFS_URL" ] && [ "$SUSFS_URL" != "null" ]; then
-          curl -sL "$SUSFS_URL" -o modules/susfs4ksu.zip
-          echo "✅ susfs4ksu $(echo "$SUSFS_REL" | jq -r '.tag_name')"
+          curl -sL "$SUSFS_URL" -o modules/ksu_module_susfs.zip
+          echo "✅ susfs module $(echo "$SUSFS_REL" | jq -r '.tag_name')"
         else
-          echo "::warning::تعذّر تحميل susfs4ksu — تحقق يدوياً من https://github.com/sidex15/susfs4ksu-module"
+          echo "⚠️ SUSFS module غير متاح — تحقق من https://github.com/sidex15/ksu_module_susfs"
         fi
-
         echo "::endgroup::"
 
-    # ────────────────────────────────────────────────────
-    - name: 🔀 Multi Manager — ZygiskNext + Shamiko
-      if: inputs.multi_manager == 'true'
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
+    - name: 🔀 ZygiskNext + Shamiko
+      if: inputs.include_zygisk == 'true'
+    # ─────────────────────────────────────────
       run: |
-        echo "::group::Multi Manager Modules"
+        echo "::group::Zygisk Modules"
         mkdir -p modules
 
-        # ── ZygiskNext ──
-        ZYGISK_REL=$(curl -s https://api.github.com/repos/Dr-TSNG/ZygiskNext/releases/latest)
-        ZYGISK_URL=$(echo "$ZYGISK_REL" | jq -r '
-          .assets[]
-          | select(.name | endswith(".zip"))
-          | .browser_download_url' | head -1)
-        if [ -n "$ZYGISK_URL" ] && [ "$ZYGISK_URL" != "null" ]; then
-          curl -sL "$ZYGISK_URL" -o modules/ZygiskNext.zip
-          echo "✅ ZygiskNext $(echo "$ZYGISK_REL" | jq -r '.tag_name')"
-        else
-          echo "::warning::ZygiskNext غير متاح"
-        fi
+        # ZygiskNext
+        ZYGISK_URL=$(curl -s https://api.github.com/repos/Dr-TSNG/ZygiskNext/releases/latest \
+          | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)
+        [ -n "$ZYGISK_URL" ] && curl -sL "$ZYGISK_URL" -o modules/ZygiskNext.zip && echo "✅ ZygiskNext"
 
-        # ── Shamiko ──
-        SHAMIKO_REL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed.github.io/releases/latest)
-        SHAMIKO_URL=$(echo "$SHAMIKO_REL" | jq -r '
-          .assets[]
-          | select(.name | test("[Ss]hamiko"))
-          | .browser_download_url' | head -1)
-        if [ -n "$SHAMIKO_URL" ] && [ "$SHAMIKO_URL" != "null" ]; then
-          curl -sL "$SHAMIKO_URL" -o modules/Shamiko.zip
-          echo "✅ Shamiko downloaded"
-        else
-          echo "::warning::Shamiko غير متاح"
-        fi
+        # Shamiko
+        SHAMIKO_URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed.github.io/releases/latest \
+          | jq -r '.assets[] | select(.name | test("[Ss]hamiko")) | .browser_download_url' | head -1)
+        [ -n "$SHAMIKO_URL" ] && curl -sL "$SHAMIKO_URL" -o modules/Shamiko.zip && echo "✅ Shamiko"
 
         echo "::endgroup::"
 
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
     - name: 🧩 LSPosed
       if: inputs.include_lsposed == 'true'
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
       run: |
         mkdir -p modules
-        LSPOSED_REL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest)
-        LSPOSED_URL=$(echo "$LSPOSED_REL" | jq -r '
-          .assets[]
-          | select(.name | test("[Ll][Ss][Pp]osed.*[Zz]ygisk"))
-          | .browser_download_url' | head -1)
-        if [ -n "$LSPOSED_URL" ] && [ "$LSPOSED_URL" != "null" ]; then
-          curl -sL "$LSPOSED_URL" -o modules/LSPosed.zip
-          echo "✅ LSPosed $(echo "$LSPOSED_REL" | jq -r '.tag_name')"
-        else
-          echo "::warning::LSPosed غير متاح"
-        fi
+        LSPOSED_URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest \
+          | jq -r '.assets[] | select(.name | test("[Ll][Ss][Pp]osed.*[Zz]ygisk")) | .browser_download_url' | head -1)
+        [ -n "$LSPOSED_URL" ] && curl -sL "$LSPOSED_URL" -o modules/LSPosed.zip && echo "✅ LSPosed"
 
-    # ────────────────────────────────────────────────────
-    - name: 📤 Upload — Patched Boot + APK
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
+    - name: 📤 رفع boot.img + Managers
+    # ─────────────────────────────────────────
       uses: actions/upload-artifact@v4
       with:
-        name: KSU-Boot [${{ inputs.ksu_variant }}] [${{ env.KSU_TAG }}]
+        name: KSU-Boot [${{ env.GKI_LABEL }}] [${{ env.KERNEL_KMI }}]
         path: |
           ksu_patched_boot.img
-          KSUManager_*.apk
+          managers/
         retention-days: 7
 
-    - name: 📤 Upload — Modules
-      if: inputs.multi_manager == 'true' || inputs.include_susfs_module == 'true' || inputs.include_lsposed == 'true'
+    - name: 📤 رفع Modules
+      if: inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: KSU-Modules [${{ inputs.ksu_variant }}]
+        name: KSU-Modules [${{ env.GKI_LABEL }}]
         path: modules/
         retention-days: 7
 
-    # ────────────────────────────────────────────────────
-    - name: 📋 Summary
-    # ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────
+    - name: 📋 ملخص
+    # ─────────────────────────────────────────
       if: always()
       run: |
-        SUSFS_NOTE=""
-        if [ "${{ inputs.ksu_variant }}" = "KernelSU" ]; then
-          SUSFS_NOTE=" ⚠️ (KernelSU official لا يدعم SUSFS في الـ prebuilts)"
-        fi
-
         {
-          echo "## ✅ KSU Boot Patcher — Done"
+          echo "## ✅ KSU Boot Patcher"
           echo ""
           echo "| | |"
           echo "|---|---|"
-          echo "| 📦 Variant | \`${{ inputs.ksu_variant }}\` |"
-          echo "| 🏷 Version | \`$KSU_TAG\` |"
-          echo "| 🛡 SUSFS Module | \`${{ inputs.include_susfs_module }}\`$SUSFS_NOTE |"
-          echo "| 🔀 Multi Manager | \`${{ inputs.multi_manager }}\` |"
-          echo "| 🧩 LSPosed | \`${{ inputs.include_lsposed }}\` |"
+          echo "| 📦 GKI Source | \`${{ inputs.gki_source }}\` |"
+          echo "| 🏷 GKI Version | \`$GKI_TAG\` |"
+          echo "| 🔖 Kernel KMI | \`$KERNEL_KMI\` |"
+          echo "| 🛡 SUSFS Module | \`${{ inputs.include_susfs_module }}\` |"
+          echo "| 🔀 Zygisk | \`${{ inputs.include_zygisk }}\` |"
           echo ""
-          echo "### 📱 Flash Order"
+          echo "### 📱 Flash"
+          echo '```bash'
+          echo "adb reboot bootloader"
+          echo "fastboot flash boot ksu_patched_boot.img"
+          echo "fastboot reboot"
           echo '```'
-          echo "1. adb reboot bootloader"
-          echo "2. fastboot flash boot ksu_patched_boot.img"
-          echo "3. fastboot reboot"
-          echo "4. Install KSUManager.apk"
-          if [ "${{ inputs.multi_manager }}" = "true" ]; then
-            echo "5. KSU Manager → Flash ZygiskNext.zip"
-            echo "6. KSU Manager → Flash Shamiko.zip"
-          fi
-          if [ "${{ inputs.include_susfs_module }}" = "true" ]; then
-            echo "7. KSU Manager → Flash susfs4ksu.zip"
-          fi
-          echo "8. Reboot"
-          echo '```'
+          echo ""
+          echo "### 📲 Manager — ثبّت أي واحد منهم أو الاتنين"
+          if [ -n "$MGR1_NAME" ]; then echo "- \`${MGR1_NAME}.apk\`"; fi
+          if [ -n "$MGR2_NAME" ]; then echo "- \`${MGR2_NAME}.apk\`"; fi
+          echo ""
+          echo "### 🔧 Modules Order في KSU Manager"
+          echo "1. \`ksu_module_susfs.zip\` (لو فعّلته)"
+          echo "2. \`ZygiskNext.zip\` (لو فعّلته)"
+          echo "3. \`Shamiko.zip\` (لو فعّلته)"
+          echo "4. \`LSPosed.zip\` (لو فعّلته)"
+          echo "5. Reboot"
         } >> $GITHUB_STEP_SUMMARY
