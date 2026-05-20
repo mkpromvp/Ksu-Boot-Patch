@@ -65,7 +65,7 @@ jobs:
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: 📦 Extract boot.img (if ZIP or Payload)
+    - name: 📦 Extract boot.img (Direct / ZIP / Payload.bin)
     # ────────────────────────────────────────────
       run: |
         echo "::group::Extract boot.img"
@@ -77,6 +77,7 @@ jobs:
         if echo "$FILE_TYPE" | grep -qi 'zip\|archive'; then
           echo "→ ZIP detected, analyzing contents..."
 
+          # 1. لو المستخدم كاتب مسار يدوي جوه الـ ZIP
           if [ -n "${{ inputs.zip_boot_path }}" ]; then
             echo "Using specified path: ${{ inputs.zip_boot_path }}"
             unzip -j input_file "${{ inputs.zip_boot_path }}" -d extracted_rom/ || {
@@ -85,6 +86,7 @@ jobs:
             }
             BOOT_FILE=$(find extracted_rom -name '*.img' | head -1)
 
+          # 2. لو مفيش مسار يدوي، بندور تلقائي على boot.img مباشر جوه الـ ZIP
           else
             BOOT_PATH=$(unzip -l input_file \
               | awk '{print $4}' \
@@ -93,29 +95,35 @@ jobs:
               | head -1)
 
             if [ -n "$BOOT_PATH" ]; then
-              echo "Found direct boot.img at: $BOOT_PATH"
+              echo "Found direct boot.img inside ZIP at: $BOOT_PATH"
               unzip -j input_file "$BOOT_PATH" -d extracted_rom/
               BOOT_FILE=$(find extracted_rom -name '*.img' | head -1)
             fi
           fi
 
+          # 3. لو ملحقناش ملف boot.img مباشر، معناها ده Recovery ROM وجواه payload.bin
           if [ -z "$BOOT_FILE" ] || [ ! -s "$BOOT_FILE" ]; then
             PAYLOAD_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i 'payload\.bin$' | head -1)
             
             if [ -n "$PAYLOAD_PATH" ]; then
               echo "💡 Recovery ROM detected (payload.bin found). Extracting boot.img..."
+              
+              # استخراج ملف payload.bin فقط لتوفير الوقت والمساحة
               unzip -j input_file "$PAYLOAD_PATH" -d .
               
+              # تحميل أداة payload-dumper-go الذكية
               curl -sL https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz | tar -xvz
               chmod +x payload-dumper-go
               
+              # استخراج الـ boot.img فقط من الـ payload وتوجيهه لمجلد الفك
               ./payload-dumper-go -p boot -o extracted_rom payload.bin
               BOOT_FILE=$(find extracted_rom -name 'boot.img' | head -1)
             fi
           fi
 
+          # إذا فشلت كل المحاولات ولم نجد شيء
           if [ -z "$BOOT_FILE" ] || [ ! -s "$BOOT_FILE" ]; then
-            echo "::error::Cannot find boot.img or payload.bin in ZIP"
+            echo "::error::Cannot find boot.img or payload.bin inside the provided ZIP file."
             exit 1
           fi
 
@@ -123,7 +131,7 @@ jobs:
           echo "✅ Extracted boot.img successfully"
 
         else
-          echo "→ Direct boot.img file"
+          echo "→ Direct boot.img file provided"
           mv input_file boot.img
         fi
 
@@ -161,7 +169,7 @@ jobs:
         KERNEL_FILE=$(find . -maxdepth 1 \( -name 'kernel' -o -name 'Image' -o -name 'kernel.gz' \) | head -1)
 
         if [ -z "$KERNEL_FILE" ]; then
-          echo "::error::❌ Cannot find kernel file after unpack. This boot.img might be encrypted or non-standard."
+          echo "::error::❌ Cannot find kernel file after unpack."
           exit 1
         fi
 
@@ -195,7 +203,7 @@ jobs:
            fi
         fi
 
-        # 🚨 جدار الحماية (GKI Safety Gate)
+        # جدار الحماية (GKI Safety Gate)
         MAJOR=$(echo "$KSHORT" | cut -d. -f1)
         MINOR=$(echo "$KSHORT" | cut -d. -f2)
         
@@ -440,7 +448,6 @@ jobs:
         retention-days: 7
 
     # ────────────────────────────────────────────
-        # ────────────────────────────────────────────
     - name: 📋 Summary
     # ────────────────────────────────────────────
       if: always()
