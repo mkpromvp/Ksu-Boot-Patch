@@ -180,7 +180,7 @@ jobs:
           TARGET_FILE="$KERNEL_FILE"
         fi
 
-        # 1. لقط سطر الـ Linux version بالكامل
+        # 1. لقط سطر الـ Linux version بالكامل من ملف الكيرنال
         KERNEL_FULL=$(strings "$TARGET_FILE" | grep -E "Linux version [0-9]+\.[0-9]+" | head -1)
         
         if [ -z "$KERNEL_FULL" ]; then
@@ -189,19 +189,17 @@ jobs:
 
         echo "Full Line Detected: $KERNEL_FULL"
 
-        # 2. استخراج النسخة القصيرة (مثال: 6.12 أو 5.10)
-        KSHORT=$(echo "$KERNEL_FULL" | grep -oE "Linux version [0-9]+\.[0-9]+" | awk '{print $3}' || echo "")
-        [ -z "$KSHORT" ] && KSHORT=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+" | head -1)
+        # 2. استخراج إصدار الكيرنال الصافي والكامل (مثال: 5.10.101 أو 6.12.30)
+        KERNEL_VER=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
 
-        # 3. استخراج نسخة الأندرويد (مثال: android16 أو android12)
+        # 3. استخراج النسخة القصيرة الـ Base (مثال: 5.10 أو 6.12)
+        KSHORT=$(echo "$KERNEL_VER" | cut -d. -f1,2)
+
+        # 4. استخراج نسخة الأندرويد (مثال: android12 أو android16)
         ANDROID_VER=$(echo "$KERNEL_FULL" | grep -oE "android[0-9]+" | head -1)
 
-        # 4. بناء الـ KMI الحقيقي المعتمد في ريبوهات الـ GKI
+        # 5. بناء الـ KMI الأساسي اللي بندور بيه في المستودعات (مثال: 5.10-android12)
         KERNEL_KMI="${KSHORT}-${ANDROID_VER}"
-
-        # استخراج الـ KMI التفصيلي بالرقم الفرعي لو موجود (مثال: 6.12.30-android16-5)
-        KERNEL_KMI_FULL=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+-android[0-9]+-[0-9]+" | head -1)
-        [ -z "$KERNEL_KMI_FULL" ] && KERNEL_KMI_FULL=$KERNEL_KMI
 
         # جدار الحماية (GKI Safety Gate) لضمان عدم تمرير كيرنال قديم
         MAJOR=$(echo "$KSHORT" | cut -d. -f1)
@@ -217,17 +215,18 @@ jobs:
           exit 1
         fi
 
+        # طباعة النتائج النهائية بشكل شيك ونظيف جداً في الـ Log
         echo "📊 Final Extraction Results:"
         echo "============================="
-        echo "Short Version: $KSHORT"
-        echo "Android Ver  : $ANDROID_VER"
-        echo "GKI KMI Base : $KERNEL_KMI"
-        echo "Full KMI Spec: $KERNEL_KMI_FULL"
+        echo "Kernel Version: $KERNEL_VER"
+        echo "Kernel Base   : $KSHORT"
+        echo "Android Ver   : $ANDROID_VER"
+        echo "GKI KMI Match : $KERNEL_KMI"
         echo "============================="
 
         echo "KERNEL_FULL=$KERNEL_FULL"       >> $GITHUB_ENV
+        echo "KERNEL_VER=$KERNEL_VER"         >> $GITHUB_ENV
         echo "KERNEL_KMI=$KERNEL_KMI"         >> $GITHUB_ENV
-        echo "KERNEL_KMI_FULL=$KERNEL_KMI_FULL" >> $GITHUB_ENV
         echo "ANDROID_VER=$ANDROID_VER"       >> $GITHUB_ENV
         echo "KSHORT=$KSHORT"                 >> $GITHUB_ENV
         echo "KERNEL_FILE=$KERNEL_FILE"       >> $GITHUB_ENV
@@ -270,6 +269,7 @@ jobs:
     - name: 📥 Find matching GKI Image
     # ────────────────────────────────────────────
       run: |
+        # استدعاء المتغيرات البيئية المجهزة من خطوة الـ Detect
         echo "::group::Fetch GKI from $GKI_REPO"
         set +e
 
@@ -281,7 +281,7 @@ jobs:
 
         IMG_URL=""
 
-        # محاولة البحث بالـ KMI الذكي (وجود نسخة الكيرنال والاندرويد معاً في اسم الملف)
+        # محاولة البحث بالـ KMI الذكي المستخرج مسبقاً (وجود نسخة الكيرنال والاندرويد معاً في اسم الملف)
         if [ -n "$KSHORT" ] && [ -n "$ANDROID_VER" ]; then
           IMG_URL=$(echo "$RELEASE" | jq -r \
             --arg a "$ANDROID_VER" --arg k "$KSHORT" '
@@ -473,8 +473,8 @@ jobs:
         |---|---|
         | GKI Source | `${{ inputs.gki_source }}` |
         | GKI Version | `$GKI_TAG` |
-        | Kernel KMI Base | `$KERNEL_KMI` |
-        | Kernel Full Spec | `$KERNEL_KMI_FULL` |
+        | Kernel Version | `$KERNEL_VER` |
+        | Kernel KMI Match | `$KERNEL_KMI` |
         | Android Version | `$ANDROID_VER` |
 
         ### Flash
