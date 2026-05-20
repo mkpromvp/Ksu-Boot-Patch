@@ -440,45 +440,49 @@ jobs:
         retention-days: 7
 
     # ────────────────────────────────────────────
+        # ────────────────────────────────────────────
     - name: 📋 Summary
     # ────────────────────────────────────────────
       if: always()
       run: |
-        {
-          echo "## 🔧 KSU Boot Patcher (Automated GKI Swapper)"
-          echo ""
-          echo "> ⚠️ **ملحوظة للأمان:** هذا السكريبت يستبدل الكيرنال بالكامل بكيرنال GKI جاهز مسبقاً، ولا يقوم بعملية دمج أو تعديل يدوي للأكواد داخلياً."
-          echo ""
-          echo "| | |"
-          echo "|---|---|"
-          echo "| GKI Source | \`${{ inputs.gki_source }}\` |"
-          echo "| GKI Version | \`$GKI_TAG\` |"
-          echo "| Kernel KMI | \`$KERNEL_KMI\` |"
-          echo "| Kernel Full | \`$KERNEL_FULL\` |"
-          echo "| Android | \`$ANDROID_VER\` |"
-          echo ""
-          echo "### Flash"
-          echo '```bash'
-          echo "adb reboot bootloader"
-          echo "fastboot flash boot ksu_patched_boot.img"
-          echo "fastboot reboot"
-          echo '```'
-          echo ""
-          echo "### Restore stock"
-          echo '```bash'
-          echo "fastboot flash boot stock_boot.img"
-          echo "fastboot reboot"
-          echo '
-```'
-          echo ""
-          echo "### Managers (install any or both)"
-          [ -n "$MGR1_NAME" ] && echo "- \`${MGR1_NAME}.apk\`"
-          [ -n "$MGR2_NAME" ] && echo "- \`${MGR2_NAME}.apk\`"
-          echo ""
-          echo "### Module flash order"
-          echo "1. ksu_module_susfs.zip"
-          echo "2. ZygiskNext.zip"
-          echo "3. Shamiko.zip"
-          echo "4. LSPosed.zip"
-          echo "5. Reboot"
-        } >> $GITHUB_STEP_SUMMARY
+        cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+        ## 🔧 KSU Boot Patcher (Automated GKI Swapper)
+
+        > ⚠️ **ملحوظة للأمان:** هذا السكريبت يستبدل الكيرنال بالكامل بكيرنال GKI جاهز مسبقاً، ولا يقوم بعملية دمج أو تعديل يدوي للأكواد داخلياً.
+
+        | | |
+        |---|---|
+        | GKI Source | `${{ inputs.gki_source }}` |
+        | GKI Version | `$GKI_TAG` |
+        | Kernel KMI | `$KERNEL_KMI` |
+        | Kernel Full | `$KERNEL_FULL` |
+        | Android | `$ANDROID_VER` |
+
+        ### Flash
+        ```bash
+        adb reboot bootloader
+        fastboot flash boot ksu_patched_boot.img
+        fastboot reboot
+        ```
+
+        ### Restore stock
+        ```bash
+        fastboot flash boot stock_boot.img
+        fastboot reboot
+        ```
+
+        ### Managers (install any or both)
+        EOF
+
+        [ -n "$MGR1_NAME" ] && echo "- \`${MGR1_NAME}.apk\`" >> $GITHUB_STEP_SUMMARY
+        [ -n "$MGR2_NAME" ] && echo "- \`${MGR2_NAME}.apk\`" >> $GITHUB_STEP_SUMMARY
+
+        cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+
+        ### Module flash order
+        1. ksu_module_susfs.zip
+        2. ZygiskNext.zip
+        3. Shamiko.zip
+        4. LSPosed.zip
+        5. Reboot
+        EOF
