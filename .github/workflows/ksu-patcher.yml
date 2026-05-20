@@ -189,16 +189,16 @@ jobs:
 
         echo "Full Line Detected: $KERNEL_FULL"
 
-        # 2. استخراج إصدار الكيرنال الصافي والكامل (مثال: 5.10.101 أو 6.12.30)
+        # 2. استخراج إصدار الكيرنال الصافي والكامل (مثال: 6.12.30)
         KERNEL_VER=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
 
-        # 3. استخراج النسخة القصيرة الـ Base (مثال: 5.10 أو 6.12)
+        # 3. استخراج النسخة القصيرة الـ Base (مثال: 6.12)
         KSHORT=$(echo "$KERNEL_VER" | cut -d. -f1,2)
 
-        # 4. استخراج نسخة الأندرويد (مثال: android12 أو android16)
+        # 4. استخراج نسخة الأندرويد (مثال: android16)
         ANDROID_VER=$(echo "$KERNEL_FULL" | grep -oE "android[0-9]+" | head -1)
 
-        # 5. بناء الـ KMI الأساسي اللي بندور بيه في المستودعات (مثال: 5.10-android12)
+        # 5. بناء الـ KMI الأساسي للريبوهات (مثال: 6.12-android16)
         KERNEL_KMI="${KSHORT}-${ANDROID_VER}"
 
         # جدار الحماية (GKI Safety Gate) لضمان عدم تمرير كيرنال قديم
@@ -269,7 +269,6 @@ jobs:
     - name: 📥 Find matching GKI Image
     # ────────────────────────────────────────────
       run: |
-        # استدعاء المتغيرات البيئية المجهزة من خطوة الـ Detect
         echo "::group::Fetch GKI from $GKI_REPO"
         set +e
 
@@ -281,7 +280,7 @@ jobs:
 
         IMG_URL=""
 
-        # محاولة البحث بالـ KMI الذكي المستخرج مسبقاً (وجود نسخة الكيرنال والاندرويد معاً في اسم الملف)
+        # محاولة البحث بالـ KMI الذكي (وجود نسخة الكيرنال والاندرويد معاً في اسم الملف)
         if [ -n "$KSHORT" ] && [ -n "$ANDROID_VER" ]; then
           IMG_URL=$(echo "$RELEASE" | jq -r \
             --arg a "$ANDROID_VER" --arg k "$KSHORT" '
@@ -336,11 +335,9 @@ jobs:
 
         mkdir -p extracted_gki
 
-        # فحص حقيقي لنوع الملف بغض النظر عن المتغيرات السابقة
         if file gki_asset | grep -qi 'zip\|archive'; then
           echo "→ GKI Asset is a ZIP archive (AnyKernel3 format detected)"
           
-          # محاولة استخراج الكيرنال بكافة مسمياته الشائعة عند المطورين
           unzip -j gki_asset 'Image'       -d extracted_gki/ 2>/dev/null || \
           unzip -j gki_asset '*/Image'     -d extracted_gki/ 2>/dev/null || \
           unzip -j gki_asset 'kernel'      -d extracted_gki/ 2>/dev/null || \
@@ -357,7 +354,6 @@ jobs:
 
         echo "Selected GKI Kernel Binary: $GKI_IMAGE"
 
-        # فك ضغط الكيرنال المجلوب لو كان مضغوطاً لحقنه صافي
         if file "$GKI_IMAGE" | grep -qi 'gzip'; then
           echo "→ Decompressing downloaded GKI kernel (GZIP detected)..."
           gunzip -c "$GKI_IMAGE" > extracted_gki/Image_raw
@@ -365,7 +361,6 @@ jobs:
         fi
 
         cd workspace
-        # استبدال الكيرنال القديم بالجديد مع الحفاظ على نفس الاسم الأصلي للـ Boot
         cp "../$GKI_IMAGE" "$(basename $KERNEL_FILE)"
         
         echo "Repacking boot.img..."
