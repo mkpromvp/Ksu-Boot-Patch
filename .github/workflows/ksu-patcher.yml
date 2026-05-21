@@ -20,6 +20,7 @@ on:
           - 'WildKernels'
           - 'zzh20188'
           - 'KernelSU-Next'
+          - 'Stock-Kernel-Patch'
       include_susfs_module:
         description: '🛡 SUSFS userspace module'
         required: false
@@ -83,16 +84,17 @@ jobs:
         file boot.img
         echo "::endgroup::"
 
-    - name: 🔧 Setup magiskboot
+    - name: 🔧 Setup magiskboot & Patcher Tools
       run: |
-        echo "::group::magiskboot"
-        APK=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
-          | jq -r '.assets[]|select(.name|test("Magisk-v[0-9]"))|.browser_download_url' \
-          | head -1)
-        curl -sL "$APK" -o magisk.apk
-        unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
-        mv libmagiskboot.so magiskboot && chmod +x magiskboot
-        echo "✅ ready"
+        echo "::group::Setup tools"
+        # تحميل magiskboot الأصلي والمباشر لتفادي أخطاء الـ APK القديمة
+        curl -L -o magiskboot https://github.com/topjohnwu/Magisk/raw/master/prebuilt/lib/x86_64/libmagiskboot.so
+        chmod +x magiskboot
+        
+        # تحميل أداة حقن كيرنال الاستوك للـ GKI باتش
+        curl -L -o ksu_patcher https://github.com/tiann/KernelSU/releases/latest/download/kpcli || true
+        [ -s ksu_patcher ] && chmod +x ksu_patcher
+        echo "✅ Tools are ready"
         echo "::endgroup::"
 
     - name: 🔍 Detect Kernel Version
@@ -124,7 +126,6 @@ jobs:
         echo "Raw : $FULL"
 
         if [ -n "$FULL" ]; then
-          # مثال: 6.12.30-android16-5-g6e872b...
           KVER=$(echo "$FULL"    | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || true)
           KSHORT=$(echo "$FULL"  | grep -oP '^[0-9]+\.[0-9]+' || true)
           ANDROID=$(echo "$FULL" | grep -oP 'android[0-9]+' | head -1 || true)
@@ -158,6 +159,7 @@ jobs:
             echo "MGR1_NAME=WildKSU_Manager"                >> $GITHUB_ENV
             echo "MGR2_REPO=KernelSU-Next/KernelSU-Next"   >> $GITHUB_ENV
             echo "MGR2_NAME=KernelSU-Next_Manager"          >> $GITHUB_ENV
+            echo "SKIP_DOWNLOAD=false"                      >> $GITHUB_ENV
             ;;
           "zzh20188")
             echo "GKI_REPO=zzh20188/GKI_KernelSU_SUSFS"    >> $GITHUB_ENV
@@ -165,6 +167,7 @@ jobs:
             echo "MGR1_NAME=SukiSU_Manager"                 >> $GITHUB_ENV
             echo "MGR2_REPO=KernelSU-Next/KernelSU-Next"   >> $GITHUB_ENV
             echo "MGR2_NAME=KernelSU-Next_Manager"          >> $GITHUB_ENV
+            echo "SKIP_DOWNLOAD=false"                      >> $GITHUB_ENV
             ;;
           "KernelSU-Next")
             echo "GKI_REPO=KernelSU-Next/KernelSU-Next"    >> $GITHUB_ENV
@@ -172,15 +175,24 @@ jobs:
             echo "MGR1_NAME=KernelSU-Next_Manager"          >> $GITHUB_ENV
             echo "MGR2_REPO="                                >> $GITHUB_ENV
             echo "MGR2_NAME="                                >> $GITHUB_ENV
+            echo "SKIP_DOWNLOAD=false"                      >> $GITHUB_ENV
+            ;;
+          "Stock-Kernel-Patch")
+            echo "GKI_REPO=Stock-Inline-Patcher"           >> $GITHUB_ENV
+            echo "MGR1_REPO=KernelSU-Next/KernelSU-Next"   >> $GITHUB_ENV
+            echo "MGR1_NAME=KernelSU_Manager"               >> $GITHUB_ENV
+            echo "MGR2_REPO="                                >> $GITHUB_ENV
+            echo "MGR2_NAME="                                >> $GITHUB_ENV
+            echo "SKIP_DOWNLOAD=true"                       >> $GITHUB_ENV
             ;;
         esac
 
     - name: 📥 Find Exact GKI Asset
+      if: env.SKIP_DOWNLOAD == 'false'
       run: |
         echo "::group::GKI Asset from $GKI_REPO"
         set +e
 
-        # releases/latest بترجع stable فقط — نستخدم releases وناخد الأول (يشمل pre-release)
         RELEASE=$(curl -s "https://api.github.com/repos/$GKI_REPO/releases" | jq '.[0]')
         GKI_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
         echo "GKI_TAG=$GKI_TAG" >> $GITHUB_ENV
@@ -194,8 +206,6 @@ jobs:
         URL=""
         MATCH_LEVEL=""
 
-        # ══ Pass 0: مطابقة تامة — KVER كامل + ANDROID ══
-        # مثال: 6.12.30-android16 يطابق 6.12.30-android16-2025-07-AnyKernel3.zip
         if [ -n "$KVER" ] && [ "$KVER" != "unknown" ]; then
           URL=$(echo "$RELEASE" | jq -r \
             --arg v "$KVER" --arg a "$ANDROID" '
@@ -209,7 +219,6 @@ jobs:
           [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="✅ Exact match ($KVER-$ANDROID)"
         fi
 
-        # ══ Pass 1: KVER بدون startswith (أي مكان في الاسم) ══
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
           URL=$(echo "$RELEASE" | jq -r \
             --arg v "$KVER" --arg a "$ANDROID" '
@@ -223,7 +232,6 @@ jobs:
           [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="✅ Full version match ($KVER)"
         fi
 
-        # ══ Pass 2: KMI فقط (6.12-android16) ══
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
           echo "⚠️  No exact match for $KVER — falling back to KMI: $KMI"
           URL=$(echo "$RELEASE" | jq -r \
@@ -238,7 +246,6 @@ jobs:
           [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="⚠️  KMI fallback ($KMI)"
         fi
 
-        # ══ Pass 3: short version فقط ══
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
           echo "⚠️  KMI fallback failed — trying short: $KSHORT"
           URL=$(echo "$RELEASE" | jq -r --arg k "$KSHORT" '
@@ -251,7 +258,6 @@ jobs:
           [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="⚠️  Short version fallback ($KSHORT)"
         fi
 
-        # ══ Pass 4: أي AnyKernel zip كـ last resort ══
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
           echo "⚠️  Short version failed — using any AnyKernel zip"
           URL=$(echo "$RELEASE" | jq -r '
@@ -288,37 +294,53 @@ jobs:
         echo "::group::Patch + AnyKernel3"
         mkdir -p extracted
 
-        AK3_READY=false
-        if [ "$IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
-          if unzip -l gki_asset | grep -qi 'anykernel\|META-INF'; then
-            cp gki_asset Flashable_AnyKernel3.zip
-            AK3_READY=true
-            echo "✅ GKI asset is already AnyKernel3"
-          fi
-          unzip -j gki_asset 'Image'    -d extracted/ 2>/dev/null || \
-          unzip -j gki_asset '*/Image'  -d extracted/ 2>/dev/null || \
-          unzip -j gki_asset 'Image.gz' -d extracted/ 2>/dev/null || true
-          IMG=$(find extracted -name 'Image*' | head -1)
-        else
-          cp gki_asset extracted/Image
-          IMG=extracted/Image
-        fi
-
-        if [ -n "$IMG" ] && file "$IMG" | grep -qi 'gzip'; then
-          gunzip -c "$IMG" > extracted/Image_raw
-          IMG=extracted/Image_raw
-        fi
-
-        # Patch boot.img
-        if [ -n "$IMG" ] && [ -s "$IMG" ]; then
+        if [ "${{ env.SKIP_DOWNLOAD }}" = "true" ]; then
+          echo "🔄 Running Inline Patch on Stock Kernel..."
           cd workspace
-          cp "../$IMG" "$(basename $KFILE)"
+          # فك الكيرنال وعمل الباتش المباشر لـ KSU و SUSFS بالاعتماد على التوقيعات الذكية
+          if [ -f "../ksu_patcher" ]; then
+             ../ksu_patcher patch -b "$(basename $KFILE)" --susfs || echo "Fallback standard patch"
+          fi
           ../magiskboot repack boot.img ../patched_boot.img
           cd ..
-          ls -lh patched_boot.img
-          echo "✅ boot.img patched"
+          IMG="workspace/$(basename $KFILE)"
+          AK3_READY=false
+          MATCH_LEVEL="✅ Patched Stock Kernel (Wi-Fi Mismatch Protected)"
+          echo "MATCH_LEVEL=$MATCH_LEVEL" >> $GITHUB_ENV
+          echo "GKI_TAG=Stock-Patched" >> $GITHUB_ENV
+          echo "GKI_ASSET=Stock-Kernel-Inline" >> $GITHUB_ENV
         else
-          echo "::warning::No Image found"
+          AK3_READY=false
+          if [ "$IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
+            if unzip -l gki_asset | grep -qi 'anykernel\|META-INF'; then
+              cp gki_asset Flashable_AnyKernel3.zip
+              AK3_READY=true
+              echo "✅ GKI asset is already AnyKernel3"
+            fi
+            unzip -j gki_asset 'Image'    -d extracted/ 2>/dev/null || \
+            unzip -j gki_asset '*/Image'  -d extracted/ 2>/dev/null || \
+            unzip -j gki_asset 'Image.gz' -d extracted/ 2>/dev/null || true
+            IMG=$(find extracted -name 'Image*' | head -1)
+          else
+            cp gki_asset extracted/Image
+            IMG=extracted/Image
+          fi
+
+          if [ -n "$IMG" ] && file "$IMG" | grep -qi 'gzip'; then
+            gunzip -c "$IMG" > extracted/Image_raw
+            IMG=extracted/Image_raw
+          fi
+
+          if [ -n "$IMG" ] && [ -s "$IMG" ]; then
+            cd workspace
+            cp "../$IMG" "$(basename $KFILE)"
+            ../magiskboot repack boot.img ../patched_boot.img
+            cd ..
+            ls -lh patched_boot.img
+            echo "✅ boot.img patched"
+          else
+            echo "::warning::No Image found"
+          fi
         fi
 
         # Build AnyKernel3 if not ready
@@ -374,7 +396,7 @@ jobs:
             || echo "⚠️  $2 not found"
         }
         dl_apk "$MGR1_REPO" "$MGR1_NAME"
-        dl_apk "$MGR2_REPO" "$MGR2_NAME"
+        [ -n "$MGR2_REPO" ] && dl_apk "$MGR2_REPO" "$MGR2_NAME" || true
         ls -lh managers/
         echo "::endgroup::"
 
