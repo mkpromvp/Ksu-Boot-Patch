@@ -1,4 +1,4 @@
-name: 🔧 KSU Boot Patcher — Official kp Tool Mode (No Swap)
+name: 🔧 KSU Boot Patcher — Wild Kernel Patcher + SUSFS (No Swap)
 
 on:
   workflow_dispatch:
@@ -169,38 +169,32 @@ jobs:
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: ⚡ Patch Image using Official kp tool (tiann/KernelSU)
+    - name: ⚡ Patch Image using Wild Kernel Patcher (wkp)
     # ────────────────────────────────────────────
       run: |
-        echo "::group::Official kp Patching"
+        echo "::group::Wild Kernel Patcher Execution"
         
-        # جلب أحدث إصدار للأداة الرسمية kp (الاسم الرسمي الجديد لـ ksu_patch) من ريبو تايان الرئيسي
-        RELEASE=$(curl -s "https://api.github.com/repos/tiann/KernelSU/releases/latest")
-        KP_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
-        echo "GKI_TAG=$KP_TAG" >> $GITHUB_ENV
+        # جلب أحدث إصدار من أداة Wild Kernel Patcher الرسمية
+        WKP_RELEASE=$(curl -s "https://api.github.com/repos/ThePhon0/wild-kernel-patcher/releases/latest")
+        WKP_TAG=$(echo "$WKP_RELEASE" | jq -r '.tag_name')
+        echo "GKI_TAG=$WKP_TAG" >> $GITHUB_ENV
 
-        KP_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("kp-x86_64-unknown-linux-musl")) | .browser_download_url' | head -1)
-        
-        if [ -z "$KP_URL" ] || [ "$KP_URL" = "null" ]; then
-          # Fallback في حالة التسميات العادية
-          KP_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("kp.*linux")) | .browser_download_url' | head -1)
+        WKP_URL=$(echo "$WKP_RELEASE" | jq -r '.assets[] | select(.name | test("wkp.*linux.*amd64|wkp-x86_64-unknown-linux-musl")) | .browser_download_url' | head -1)
+        if [ -z "$WKP_URL" ] || [ "$WKP_URL" = "null" ]; then
+          # Fallback العادي للاسم
+          WKP_URL=$(echo "$WKP_RELEASE" | jq -r '.assets[] | select(.name | test("wkp")) | .browser_download_url' | head -1)
         fi
 
-        if [ -z "$KP_URL" ] || [ "$KP_URL" = "null" ]; then
-          echo "::error::❌ Could not find official kp binary in tiann/KernelSU release assets."
-          exit 1
-        fi
+        echo "Downloading Wild Kernel Patcher v$WKP_TAG..."
+        curl -L "$WKP_URL" -o wkp && chmod +x wkp
 
-        echo "Downloading Official kp tool: $KP_URL"
-        curl -L "$KP_URL" -o kp && chmod +x kp
-
-        echo "Running official patching configuration..."
-        # تشغيل الأداة الرسمية المستقرة لحقن الكود والـ SUSFS مباشرة جوه الرام ديسك للاستوك
-        ./kp patch -i stock_target.img -o ksu_patched_boot.img --susfs
+        echo "Running Wild Patcher with KernelSU-Next and SUSFS flags..."
+        # أداة wkp بتقوم بحقن الـ KernelSU والـ SUSFS مباشرة وتلقائياً كـ Patch متكامل بدون تبديل ملف الكيرنال بالكامل
+        ./wkp patch -i stock_target.img -o ksu_patched_boot.img --ksu-next --susfs
         
         echo ""
         ls -lh ksu_patched_boot.img
-        echo "✅ Patch Completed via Official kp tool cleanly!"
+        echo "✅ Wild Patching Completed Successfully!"
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
@@ -210,11 +204,12 @@ jobs:
         echo "::group::Managers"
         mkdir -p managers
         
-        URL=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest \
+        # جلب مانجر KernelSU-Next الرسمي المتوافق مع الباتش
+        URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest \
           | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
         [ -n "$URL" ] && [ "$URL" != "null" ] \
-          && curl -sL "$URL" -o "managers/KernelSU_Manager.apk" && echo "✅ KernelSU Manager OK" \
-          || echo "⚠️ KernelSU Manager not found"
+          && curl -sL "$URL" -o "managers/KernelSU-Next_Manager.apk" && echo "✅ KSUN Manager OK" \
+          || echo "⚠️ KSUN Manager not found"
           
         ls -lh managers/
         echo "::endgroup::"
@@ -262,7 +257,7 @@ jobs:
     # ────────────────────────────────────────────
       uses: actions/upload-artifact@v4
       with:
-        name: KernelSU-Patched-[${{ env.KERNEL_KMI }}]
+        name: Wild-KSU-Patched-[${{ env.KERNEL_KMI }}]
         path: |
           ksu_patched_boot.img
           managers/
@@ -272,7 +267,7 @@ jobs:
       if: inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: KernelSU-Modules-Pack
+        name: Wild-KSU-Modules-Pack
         path: modules/
         retention-days: 7
 
@@ -282,13 +277,13 @@ jobs:
     # ────────────────────────────────────────────
       run: |
         cat << EOF >> $GITHUB_STEP_SUMMARY
-        ## 🔧 KSU Boot Patcher (Official kp Tool Mode)
+        ## 🔧 KSU Boot Patcher (Wild Kernel Patcher Mode)
 
-        > 🚀 **عملية ناجحة بجدارة:** تم تعديل ملف الـ Ramdisk الأصلي الخاص بك وحقنه بـ KernelSU رسمي ودعم كامل لـ SUSFS بواسطة أداة \`kp\` دون تعديل الكيرنال الخارجي، لضمان استقرار الإقلاع $100\%$.
+        > 🚀 **الباتش الاحترافي الأقوى:** تم تعديل الكيرنال الأصلي لجهازك وحقنه بـ KernelSU-Next ودعم كامل لـ SUSFS بواسطة أداة \`wkp\` الصخرية للحفاظ على كامل تعريفات واستقرار الهاتف وبدون أي ريسك للبوتلوب.
 
         | البيانات | القيمة المستخرجة الحية |
         |---|---|
-        | **Official Tool** | tiann/KernelSU ($GKI_TAG) |
+        | **Patcher Tool** | Wild Kernel Patcher ($GKI_TAG) |
         | **Kernel Version** | $KERNEL_VER |
         | **Kernel KMI** | $KERNEL_KMI |
         | **Android Base** | $ANDROID_VER |
