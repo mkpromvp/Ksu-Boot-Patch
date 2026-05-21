@@ -60,8 +60,7 @@ jobs:
           echo ""
           if [ -n "${{ inputs.zip_boot_path }}" ]; then
             unzip -j input_file "${{ inputs.zip_boot_path }}" -d ex/ || {
-              echo "::error::Path not found"
-              exit 1
+              echo "::error::Path not found"; exit 1
             }
           else
             BOOT_PATH=$(unzip -l input_file | awk '{print $4}' \
@@ -71,8 +70,7 @@ jobs:
             [ -z "$BOOT_PATH" ] && BOOT_PATH=$(unzip -l input_file \
               | awk '{print $4}' | grep -i '^boot' | head -1)
             if [ -z "$BOOT_PATH" ]; then
-              echo "::error::Cannot find boot.img — use zip_boot_path"
-              exit 1
+              echo "::error::Cannot find boot.img — use zip_boot_path"; exit 1
             fi
             echo "Auto-found: $BOOT_PATH"
             unzip -j input_file "$BOOT_PATH" -d ex/
@@ -97,9 +95,9 @@ jobs:
         echo "✅ ready"
         echo "::endgroup::"
 
-    - name: 🔍 Detect Kernel KMI
+    - name: 🔍 Detect Kernel Version
       run: |
-        echo "::group::Detect KMI"
+        echo "::group::Detect kernel"
         set +e
 
         mkdir -p workspace && cp boot.img workspace/ && cd workspace
@@ -109,7 +107,7 @@ jobs:
         KFILE=$(find . -maxdepth 1 \
           \( -name 'kernel' -o -name 'Image' -o -name 'kernel.gz' \
              -o -name 'kernel_dtb' -o -name 'kernel-dtb' \) | head -1)
-        [ -z "$KFILE" ] && echo "::error::No kernel file found" && exit 1
+        [ -z "$KFILE" ] && echo "::error::No kernel file" && exit 1
 
         echo "Kernel : $KFILE  ($(ls -lh $KFILE | awk '{print $5}'))"
         echo "Type   : $(file $KFILE)"
@@ -123,9 +121,10 @@ jobs:
 
         FULL=$(strings "$KTARGET" 2>/dev/null \
           | grep -oP 'Linux version \K[^\s]+' | head -1 || true)
-        echo "Raw    : $FULL"
+        echo "Raw : $FULL"
 
         if [ -n "$FULL" ]; then
+          # مثال: 6.12.30-android16-5-g6e872b...
           KVER=$(echo "$FULL"    | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || true)
           KSHORT=$(echo "$FULL"  | grep -oP '^[0-9]+\.[0-9]+' || true)
           ANDROID=$(echo "$FULL" | grep -oP 'android[0-9]+' | head -1 || true)
@@ -135,7 +134,13 @@ jobs:
           KVER="unknown"; KSHORT="unknown"; ANDROID="unknown"; KMI="unknown"
         fi
 
-        echo "Full : $KVER | Short : $KSHORT | Android : $ANDROID | KMI : $KMI"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Full version : $KVER"
+        echo "Short        : $KSHORT"
+        echo "Android      : $ANDROID"
+        echo "KMI          : $KMI"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━"
+
         echo "KVER=$KVER"       >> $GITHUB_ENV
         echo "KSHORT=$KSHORT"   >> $GITHUB_ENV
         echo "ANDROID=$ANDROID" >> $GITHUB_ENV
@@ -170,7 +175,7 @@ jobs:
             ;;
         esac
 
-    - name: 📥 Find + Download GKI Asset
+    - name: 📥 Find Exact GKI Asset
       run: |
         echo "::group::GKI Asset from $GKI_REPO"
         set +e
@@ -179,41 +184,80 @@ jobs:
         GKI_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
         echo "GKI_TAG=$GKI_TAG" >> $GITHUB_ENV
         echo "Release : $GKI_TAG"
-        echo "Assets  :"
+        echo ""
+        echo "All assets:"
         echo "$RELEASE" | jq -r '.assets[].name'
         echo ""
 
         IS_ZIP=false
         URL=""
+        MATCH_LEVEL=""
 
-        # Pass 1: android + kernel version معاً
-        URL=$(echo "$RELEASE" | jq -r \
-          --arg a "$ANDROID" --arg k "$KSHORT" '
-          .assets[]
-          | select((.name|contains($a)) and (.name|contains($k)))
-          | .browser_download_url' | head -1 || true)
-
-        # Pass 2: KMI string كامل
-        if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-          URL=$(echo "$RELEASE" | jq -r --arg kmi "$KMI" '
-            .assets[]|select(.name|contains($kmi))
-            |.browser_download_url' | head -1 || true)
+        # ══ Pass 0: مطابقة تامة — KVER كامل + ANDROID ══
+        # مثال: 6.12.30-android16 يطابق 6.12.30-android16-2025-07-AnyKernel3.zip
+        if [ -n "$KVER" ] && [ "$KVER" != "unknown" ]; then
+          URL=$(echo "$RELEASE" | jq -r \
+            --arg v "$KVER" --arg a "$ANDROID" '
+            .assets[]
+            | select(
+                (.name | startswith($v)) and
+                (.name | contains($a)) and
+                (.name | test("AnyKernel|\\.zip$|Image$"))
+              )
+            | .browser_download_url' | head -1 || true)
+          [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="✅ Exact match ($KVER-$ANDROID)"
         fi
 
-        # Pass 3: short version فقط
+        # ══ Pass 1: KVER بدون startswith (أي مكان في الاسم) ══
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+          URL=$(echo "$RELEASE" | jq -r \
+            --arg v "$KVER" --arg a "$ANDROID" '
+            .assets[]
+            | select(
+                (.name | contains($v)) and
+                (.name | contains($a)) and
+                (.name | test("AnyKernel|\\.zip$|Image$"))
+              )
+            | .browser_download_url' | head -1 || true)
+          [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="✅ Full version match ($KVER)"
+        fi
+
+        # ══ Pass 2: KMI فقط (6.12-android16) ══
+        if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+          echo "⚠️  No exact match for $KVER — falling back to KMI: $KMI"
+          URL=$(echo "$RELEASE" | jq -r \
+            --arg a "$ANDROID" --arg k "$KSHORT" '
+            .assets[]
+            | select(
+                (.name | contains($a)) and
+                (.name | contains($k)) and
+                (.name | test("AnyKernel|\\.zip$|Image$"))
+              )
+            | .browser_download_url' | head -1 || true)
+          [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="⚠️  KMI fallback ($KMI)"
+        fi
+
+        # ══ Pass 3: short version فقط ══
+        if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+          echo "⚠️  KMI fallback failed — trying short: $KSHORT"
           URL=$(echo "$RELEASE" | jq -r --arg k "$KSHORT" '
             .assets[]
-            |select((.name|contains($k)) and (.name|test("AnyKernel|\\.zip$|Image$")))
-            |.browser_download_url' | head -1 || true)
+            | select(
+                (.name | contains($k)) and
+                (.name | test("AnyKernel|\\.zip$|Image$"))
+              )
+            | .browser_download_url' | head -1 || true)
+          [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="⚠️  Short version fallback ($KSHORT)"
         fi
 
-        # Pass 4: أي AnyKernel zip
+        # ══ Pass 4: أي AnyKernel zip كـ last resort ══
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+          echo "⚠️  Short version failed — using any AnyKernel zip"
           URL=$(echo "$RELEASE" | jq -r '
-            .assets[]|select(.name|test("AnyKernel.*\\.zip$"))
-            |.browser_download_url' | head -1 || true)
+            .assets[] | select(.name | test("AnyKernel.*\\.zip$"))
+            | .browser_download_url' | head -1 || true)
           IS_ZIP=true
+          [ -n "$URL" ] && [ "$URL" != "null" ] && MATCH_LEVEL="❌ Generic fallback (no version match)"
         fi
 
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
@@ -221,9 +265,18 @@ jobs:
           exit 1
         fi
 
-        echo "IS_ZIP=$IS_ZIP" >> $GITHUB_ENV
-        echo "GKI_URL=$URL"   >> $GITHUB_ENV
-        echo "✅ $(basename $URL)"
+        ASSET_NAME=$(basename "$URL")
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Match  : $MATCH_LEVEL"
+        echo "Asset  : $ASSET_NAME"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        echo "IS_ZIP=$IS_ZIP"         >> $GITHUB_ENV
+        echo "GKI_URL=$URL"           >> $GITHUB_ENV
+        echo "GKI_ASSET=$ASSET_NAME"  >> $GITHUB_ENV
+        echo "MATCH_LEVEL=$MATCH_LEVEL" >> $GITHUB_ENV
+
         curl -L --progress-bar "$URL" -o gki_asset
         file gki_asset
         set -e
@@ -234,13 +287,12 @@ jobs:
         echo "::group::Patch + AnyKernel3"
         mkdir -p extracted
 
-        # ── استخراج الـ Image ──
         AK3_READY=false
         if [ "$IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
           if unzip -l gki_asset | grep -qi 'anykernel\|META-INF'; then
             cp gki_asset Flashable_AnyKernel3.zip
             AK3_READY=true
-            echo "✅ GKI asset is AnyKernel3 ZIP"
+            echo "✅ GKI asset is already AnyKernel3"
           fi
           unzip -j gki_asset 'Image'    -d extracted/ 2>/dev/null || \
           unzip -j gki_asset '*/Image'  -d extracted/ 2>/dev/null || \
@@ -256,7 +308,7 @@ jobs:
           IMG=extracted/Image_raw
         fi
 
-        # ── Patch boot.img ──
+        # Patch boot.img
         if [ -n "$IMG" ] && [ -s "$IMG" ]; then
           cd workspace
           cp "../$IMG" "$(basename $KFILE)"
@@ -265,19 +317,18 @@ jobs:
           ls -lh patched_boot.img
           echo "✅ boot.img patched"
         else
-          echo "::warning::No Image extracted — skipping boot.img patch"
+          echo "::warning::No Image found"
         fi
 
-        # ── بناء AnyKernel3 لو مش جاهز ──
+        # Build AnyKernel3 if not ready
         if [ "$AK3_READY" = "false" ] && [ -n "$IMG" ] && [ -s "$IMG" ]; then
-          echo "Building AnyKernel3 from template..."
+          echo "Building AnyKernel3..."
           git clone --depth=1 -q https://github.com/osm0sis/AnyKernel3 ak3_tmpl
           mkdir -p AK3_OUT
           cp -r ak3_tmpl/META-INF AK3_OUT/
           cp -r ak3_tmpl/tools    AK3_OUT/ 2>/dev/null || true
           cp "$IMG" AK3_OUT/Image
 
-          # ── كتابة anykernel.sh بدون heredoc ──
           printf '%s\n' \
             '# AnyKernel3 - KSU + SUSFS GKI Kernel' \
             'properties() { '"'"'' \
@@ -376,13 +427,16 @@ jobs:
       run: |
         {
           echo "## 🔧 KSU Boot Patcher"
+          echo ""
           echo "| | |"
           echo "|---|---|"
           echo "| Source | \`${{ inputs.gki_source }}\` |"
           echo "| GKI Tag | \`$GKI_TAG\` |"
+          echo "| Kernel Version | \`$KVER\` |"
           echo "| KMI | \`$KMI\` |"
-          echo "| Kernel | \`$KVER\` |"
           echo "| Android | \`$ANDROID\` |"
+          echo "| Asset Used | \`$GKI_ASSET\` |"
+          echo "| Match Quality | $MATCH_LEVEL |"
           echo "| SUSFS | ✅ baked in kernel |"
           echo ""
           echo "### ⚡ Fastboot"
@@ -392,7 +446,7 @@ jobs:
           echo "fastboot reboot"
           echo '```'
           echo "### 🔄 Recovery (TWRP)"
-          echo "Install Flashable_AnyKernel3.zip → Swipe → Reboot"
+          echo "Install \`Flashable_AnyKernel3.zip\` → Swipe → Reboot"
           echo "### ♻️ Restore"
           echo '```bash'
           echo "fastboot flash boot stock_boot.img"
