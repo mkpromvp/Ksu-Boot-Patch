@@ -180,7 +180,8 @@ jobs:
         echo "::group::GKI Asset from $GKI_REPO"
         set +e
 
-        RELEASE=$(curl -s "https://api.github.com/repos/$GKI_REPO/releases/latest")
+        # releases/latest بترجع stable فقط — نستخدم releases وناخد الأول (يشمل pre-release)
+        RELEASE=$(curl -s "https://api.github.com/repos/$GKI_REPO/releases" | jq '.[0]')
         GKI_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
         echo "GKI_TAG=$GKI_TAG" >> $GITHUB_ENV
         echo "Release : $GKI_TAG"
