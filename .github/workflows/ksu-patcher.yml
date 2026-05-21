@@ -1,12 +1,18 @@
-name: 🚀 GKI Boot Patcher (KSUN v3.2.0 + Built-in SUSFS Kernel Swap)
+name: 🚀 GKI Boot Patcher (KSUN + SUSFS Swap & AnyKernel3)
 
 on:
   workflow_dispatch:
     inputs:
       boot_img_url:
-        description: '🔗 رابط boot.img الاستوك (لازم boot.img مش init_boot عشان الـ SUSFS)'
+        description: '🔗 رابط boot.img الاستوك (Direct Link)'
         required: true
         type: string
+        
+      create_ak3:
+        description: '📦 حفظ ملف AnyKernel3 للتفليش من الريكفري (TWRP/OrangeFox)'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   patch:
@@ -30,7 +36,7 @@ jobs:
     - name: 🔧 Setup magiskboot & Unpack
     # ────────────────────────────────────────────
       run: |
-        echo "::group::Unpack Boot Image"
+        echo "::group::Unpack & Analyze Boot"
         MAGISK_APK=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | jq -r '.assets[] | select(.name | test("Magisk-v[0-9]")) | .browser_download_url' | head -1)
         curl -sL "$MAGISK_APK" -o magisk.apk
         unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
@@ -44,81 +50,92 @@ jobs:
           exit 1
         fi
         
-        # استخراج إصدار الـ KMI من الكيرنال الاستوك
-        KERNEL_VER=$(strings kernel | grep -oE "Linux version [0-9]+\.[0-9]+" | head -1 | cut -d' ' -f3)
-        if [ -z "$KERNEL_VER" ]; then
-          KERNEL_VER="6.12" # Fallback للموبايل بتاعك
-        fi
-        ANDROID_VER="android16" # Fallback لـ Spinel
+        # 🐛 إصلاح مشكلة قراءة الـ KMI (قراءة 6.12 بدلاً من 12.30)
+        KERNEL_FULL=$(strings kernel | grep -m1 -oE "Linux version [0-9]+\.[0-9]+\.[0-9]+")
+        K_VER=$(echo "$KERNEL_FULL" | cut -d' ' -f3 | cut -d. -f1,2)
         
-        KMI_FULL=$(strings kernel | grep -oE "[0-9]+\.[0-9]+-android[0-9]+" | head -1)
-        if [ -z "$KMI_FULL" ]; then
-          KMI_FULL="${KERNEL_VER}-${ANDROID_VER}"
+        AND_FULL=$(strings kernel | grep -m1 -oE "android[0-9]+")
+        
+        if [ -n "$K_VER" ] && [ -n "$AND_FULL" ]; then
+          KMI_FULL="${K_VER}-${AND_FULL}"
+        else
+          echo "⚠️ تعذر القراءة الدقيقة، جاري استخدام القيم الافتراضية لجهازك..."
+          KMI_FULL="6.12-android16"
         fi
         
-        echo "Detected KMI: $KMI_FULL"
+        echo "✅ Detected KMI Correctly: $KMI_FULL"
         echo "KMI_FULL=$KMI_FULL" >> $GITHUB_ENV
         cd ..
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: ⚡ Fetch Pre-Patched GKI & Swap Kernel (SUSFS + KSUN)
+    - name: ⚡ Fetch Pre-Patched GKI & Swap Kernel
     # ────────────────────────────────────────────
       run: |
         echo "::group::GKI Swap Process"
         cd workspace
         
-        echo "🔍 Searching for Pre-compiled KSUN+SUSFS GKI for [$KMI_FULL]..."
+        echo "🔍 Searching for Pre-compiled KSUN+SUSFS GKI for [${KMI_FULL}]..."
         
-        # سحب أحدث إصدار من ريبو GKI_KernelSU_SUSFS
         ASSET_URL=$(curl -s https://api.github.com/repos/zzh20188/GKI_KernelSU_SUSFS/releases/latest | jq -r ".assets[] | select(.name | contains(\"${KMI_FULL}\")) | .browser_download_url" | head -1)
         
         if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" == "null" ]; then
-          echo "⚠️ Not found in zzh20188, checking WildKernels..."
           ASSET_URL=$(curl -s https://api.github.com/repos/WildKernels/GKI_KernelSU_SUSFS/releases/latest | jq -r ".assets[] | select(.name | contains(\"${KMI_FULL}\")) | .browser_download_url" | head -1)
         fi
         
         if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" == "null" ]; then
-           echo "::error::❌ Could not find a pre-patched GKI kernel for $KMI_FULL!"
+           echo "::error::❌ Could not find a pre-patched GKI kernel for ${KMI_FULL}!"
            exit 1
         fi
         
         echo "⬇️ Downloading GKI Pack from: $ASSET_URL"
         curl -L --progress-bar "$ASSET_URL" -o gki_pack.zip
         
-        # استخراج الكيرنال الجديد المدموج فيه الباتش
+        # استخراج الكيرنال
         unzip -j gki_pack.zip 'Image' -d ./ 2>/dev/null || unzip -j gki_pack.zip 'kernel' -d ./ 2>/dev/null
         
         if [ -f "Image" ]; then
           mv Image kernel
-          echo "✅ Kernel replaced with Pre-Patched GKI (SUSFS + KSUN)."
+          echo "✅ Kernel swapped with Pre-Patched GKI (SUSFS + KSUN)."
         else
           echo "::error::❌ Could not extract 'Image' from the downloaded ZIP."
           exit 1
         fi
         
-        # لو الكيرنال الجديد معاه موديولات (LKM) إضافية، هنحقنها بالمرة عشان نضمن الـ Root
+        # حقن الموديولات المرفقة لو موجودة
         if unzip -l gki_pack.zip | grep -q '\.ko$'; then
-          echo "💉 Injecting associated .ko modules into Ramdisk..."
-          mkdir -p modules && unzip -j gki_pack.zip '*.ko' -d modules/
+          echo "💉 Injecting .ko modules into Ramdisk..."
+          mkdir -p modules && unzip -j gki_pack.zip '*.ko' -d modules/ 2>/dev/null || true
           for ko_file in modules/*.ko; do
-            ko_name=$(basename "$ko_file")
-            cp "$ko_file" "$ko_name"
-            echo "add 0644 $ko_name $ko_name" >> patch_cfg.txt
+            if [ -f "$ko_file" ]; then
+              ko_name=$(basename "$ko_file")
+              cp "$ko_file" "$ko_name"
+              echo "add 0644 $ko_name $ko_name" >> patch_cfg.txt
+            fi
           done
-          ../magiskboot cpio ramdisk.cpio -f patch_cfg.txt
+          if [ -f patch_cfg.txt ]; then
+             ../magiskboot cpio ramdisk.cpio -f patch_cfg.txt
+          fi
         fi
         
-        # إعادة الكبس (Repack)
         ../magiskboot repack boot.img ../ksu_susfs_boot.img
+        
+        # 📦 حفظ ملف AnyKernel3 للتفليش من الريكفري
+        if [ "${{ inputs.create_ak3 }}" == "true" ]; then
+           echo "📦 Exposing original AnyKernel3 flashable zip..."
+           cp gki_pack.zip ../AK3-Flashable-Kernel-${KMI_FULL}.zip
+        fi
+        
         cd ..
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: 📤 Upload Patched Boot
+    - name: 📤 Upload Patched Artifacts
     # ────────────────────────────────────────────
       uses: actions/upload-artifact@v4
       with:
-        name: Boot-GKI-Swap-KSUN-SUSFS-[${{ env.KMI_FULL }}]
-        path: ksu_susfs_boot.img
+        name: Patched-GKI-[${{ env.KMI_FULL }}]
+        path: |
+          ksu_susfs_boot.img
+          AK3-Flashable-Kernel-*.zip
         retention-days: 7
