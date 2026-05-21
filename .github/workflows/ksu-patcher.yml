@@ -121,7 +121,7 @@ jobs:
         if file "$KFILE" | grep -qi 'gzip\|compressed\|lzma\|lz4'; then
           ../magiskboot decompress "$KFILE" kfile_dec 2>/dev/null
           [ -s kfile_dec ] && KTARGET=kfile_dec \
-            && echo "Decompressed: $(ls -lh kfile_dec | awk '--print $5}')"
+            && echo "Decompressed: $(ls -lh kfile_dec | awk '{print $5}')"
         fi
 
         FULL=$(strings "$KTARGET" 2>/dev/null \
@@ -263,14 +263,15 @@ jobs:
         else
           AK3_READY=false
           if [ "$IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
-            if unzip -l gki_asset | grep -qi 'anykernel\|META-INF'; then
-              cp gki_asset Flashable_AnyKernel3.zip
+            # إذا كان الـ zip يحتوي على مستودع جاهز، هنعدل جواه ملف السكريبت عشان يدعم الأوتو-ديكتكت
+            mkdir -p ak3_extracted
+            unzip -q gki_asset -d ak3_extracted/
+            if [ -f ak3_extracted/anykernel.sh ]; then
+              sed -i 's|^block=.*|block=auto;|g' ak3_extracted/anykernel.sh
+              cd ak3_extracted && zip -r9 -q ../Flashable_AnyKernel3.zip . && cd ..
               AK3_READY=true
             fi
-            unzip -j gki_asset 'Image'    -d extracted/ 2>/dev/null || \
-            unzip -j gki_asset '*/Image'  -d extracted/ 2>/dev/null || \
-            unzip -j gki_asset 'Image.gz' -d extracted/ 2>/dev/null || true
-            IMG=$(find extracted -name 'Image*' | head -1)
+            IMG=$(find ak3_extracted -name 'Image*' | head -1)
           else
             cp gki_asset extracted/Image
             IMG=extracted/Image
@@ -293,7 +294,7 @@ jobs:
           echo "::error::Failed to process Image" && exit 1
         fi
 
-        # بناء ملف AnyKernel3 الفلاشبل
+        # بناء ملف AnyKernel3 الفلاشبل مع التثبيت التلقائي الذكي للبلوك (block=auto)
         if [ "$AK3_READY" = "false" ] && [ -n "$IMG" ] && [ -s "$IMG" ]; then
           git clone --depth=1 -q https://github.com/osm0sis/AnyKernel3 ak3_tmpl
           mkdir -p AK3_OUT
@@ -311,7 +312,7 @@ jobs:
             'do.cleanup=1' \
             'do.cleanuponabort=0' \
             "'; }" \
-            'block=/dev/block/bootdevice/by-name/boot;' \
+            'block=auto;' \
             'is_slot_device=auto;' \
             'ramdisk_compression=auto;' \
             '. tools/ak3-core.sh;' \
@@ -320,7 +321,7 @@ jobs:
             > AK3_OUT/anykernel.sh
 
           cd AK3_OUT && zip -r9 -q ../Flashable_AnyKernel3.zip . && cd ..
-          echo "✅ AnyKernel3 zip generated"
+          echo "✅ AnyKernel3 zip generated with auto-block detection"
         fi
         echo "::endgroup::"
 
@@ -348,7 +349,6 @@ jobs:
         API_DATA=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest)
         URL=$(echo "$API_DATA" | jq -r '.assets[]|select(.name|endswith(".zip"))|.browser_download_url' | head -1 || true)
         
-        # حماية ضد الـ Rate Limit وتجنب خطأ الـ jq المباشر
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
           echo "⚠️ GitHub API Limit hit. Using direct fallback download link..."
           URL="https://github.com/sidex15/ksu_module_susfs/releases/download/v1.5.1/ksu_module_susfs_v1.5.1.zip"
