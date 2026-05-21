@@ -1,323 +1,124 @@
-name: 🔧 KSU Boot Patcher — Dual KSUN v3.2.0 + SUSFS.ko Kernel Patch
+name: 🚀 GKI Boot Patcher (KSUN v3.2.0 + Built-in SUSFS Kernel Swap)
 
 on:
   workflow_dispatch:
     inputs:
-
       boot_img_url:
-        description: '🔗 رابط boot.img أو init_boot.img الاستوك (Direct Link)'
+        description: '🔗 رابط boot.img الاستوك (لازم boot.img مش init_boot عشان الـ SUSFS)'
         required: true
         type: string
-
-      zip_boot_path:
-        description: '📂 مسار الملف جوا الـ ZIP — اتركه فاضي لو رابط مباشر (مثال: images/init_boot.img)'
-        required: false
-        type: string
-
-      include_susfs_module:
-        description: '🛡 Download SUSFS userspace module'
-        required: false
-        type: boolean
-        default: true
-
-      include_zygisk:
-        description: '🔀 Download ZygiskNext + Shamiko'
-        required: false
-        type: boolean
-        default: false
-
-      include_lsposed:
-        description: '🧩 Download LSPosed'
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   patch:
     runs-on: ubuntu-latest
 
     steps:
-
     # ────────────────────────────────────────────
-    - name: 📥 Download input file
+    - name: 📥 Download Stock Image
     # ────────────────────────────────────────────
       run: |
         echo "::group::Download Stock Image"
-        curl -L --progress-bar "${{ inputs.boot_img_url }}" -o input_file
-        echo ""
-        ls -lh input_file
-        file input_file
-        SIZE=$(stat -c%s input_file)
-        if [ "$SIZE" -lt 1000000 ]; then
-          echo "::error::File too small (${SIZE} bytes) — check your link"
+        curl -L --progress-bar "${{ inputs.boot_img_url }}" -o boot.img
+        if [ ! -s boot.img ]; then
+          echo "::error::❌ Failed to download boot.img!"
           exit 1
         fi
+        echo "✅ Downloaded successfully."
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: 📦 Extract Target Image (Direct / ZIP / Payload.bin)
+    - name: 🔧 Setup magiskboot & Unpack
     # ────────────────────────────────────────────
       run: |
-        echo "::group::Extract Target Image"
-        FILE_TYPE=$(file input_file)
-        echo "File type: $FILE_TYPE"
-
-        mkdir -p extracted_rom
-
-        if echo "$FILE_TYPE" | grep -qi 'zip\|archive'; then
-          echo "→ ZIP detected, analyzing contents..."
-
-          if [ -n "${{ inputs.zip_boot_path }}" ]; then
-            echo "Using specified path: ${{ inputs.zip_boot_path }}"
-            unzip -j input_file "${{ inputs.zip_boot_path }}" -d extracted_rom/ || {
-              echo "::error::Path '${{ inputs.zip_boot_path }}' not found in ZIP"
-              exit 1
-            }
-            TARGET_FILE=$(find extracted_rom -name '*.img' | head -1)
-
-          else
-            TARGET_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i 'init_boot\.img$' | head -1)
-            
-            if [ -z "$TARGET_PATH" ]; then
-              TARGET_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i 'boot\.img$' | grep -v 'vendor_boot\|recovery\|vbmeta' | head -1)
-            fi
-
-            if [ -n "$TARGET_PATH" ]; then
-              echo "Found target image inside ZIP at: $TARGET_PATH"
-              unzip -j input_file "$TARGET_PATH" -d extracted_rom/
-              TARGET_FILE=$(find extracted_rom -name '*.img' | head -1)
-            fi
-          fi
-
-          if [ -z "$TARGET_FILE" ] || [ ! -s "$TARGET_FILE" ]; then
-            PAYLOAD_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i 'payload\.bin$' | head -1)
-            
-            if [ -n "$PAYLOAD_PATH" ]; then
-              echo "💡 Recovery ROM detected (payload.bin found). Extracting image..."
-              unzip -j input_file "$PAYLOAD_PATH" -d .
-              curl -sL https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz | tar -xvz
-              chmod +x payload-dumper-go
-              
-              ./payload-dumper-go -p init_boot -o extracted_rom payload.bin 2>/dev/null || ./payload-dumper-go -p boot -o extracted_rom payload.bin
-              TARGET_FILE=$(find extracted_rom -name '*.img' | head -1)
-            fi
-          fi
-
-          if [ -z "$TARGET_FILE" ] || [ ! -s "$TARGET_FILE" ]; then
-            echo "::error::Cannot find valid boot/init_boot image inside the provided ZIP file."
-            exit 1
-          fi
-
-          mv "$TARGET_FILE" stock_target.img
-          echo "✅ Extracted successfully"
-
-        else
-          echo "→ Direct image file provided"
-          mv input_file stock_target.img
-        fi
-
-        ls -lh stock_target.img
-        echo "::endgroup::"
-
-    # ────────────────────────────────────────────
-    - name: 🔧 Setup magiskboot & Get Kernel Info
-    # ────────────────────────────────────────────
-      run: |
-        echo "::group::Analyze Stock Kernel"
-        set +e
-
+        echo "::group::Unpack Boot Image"
         MAGISK_APK=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | jq -r '.assets[] | select(.name | test("Magisk-v[0-9]")) | .browser_download_url' | head -1)
         curl -sL "$MAGISK_APK" -o magisk.apk
         unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
         mv libmagiskboot.so magiskboot && chmod +x magiskboot
 
-        mkdir -p info_workspace && cp stock_target.img info_workspace/ && cd info_workspace
-        ../magiskboot unpack stock_target.img
-        
-        KERNEL_VER="6.12.30"
-        KERNEL_KMI="6.12-android16"
-        ANDROID_VER="android16"
-
-        if [ -n "$KERNEL_FILE" ]; then
-          ../magiskboot decompress "$KERNEL_FILE" decompressed_k 2>/dev/null
-          if [ -s decompressed_k ]; then TARGET_K="decompressed_k"; else TARGET_K="$KERNEL_FILE"; fi
-          
-          KERNEL_FULL=$(strings "$TARGET_K" | grep -E "Linux version [0-9]+\.[0-9]+" | head -1)
-          if [ -z "$KERNEL_FULL" ]; then
-            KERNEL_FULL=$(strings "$TARGET_K" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+-android[0-9]+-[0-9]+" | head -1)
-          fi
-          
-          if [ -n "$KERNEL_FULL" ]; then
-            KERNEL_VER=$(echo "$KERNEL_FULL" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-            KSHORT=$(echo "$KERNEL_VER" | cut -d. -f1,2)
-            ANDROID_VER=$(echo "$KERNEL_FULL" | grep -oE "android[0-9]+" | head -1)
-            KERNEL_KMI="${KSHORT}-${ANDROID_VER}"
-          fi
-        fi
-
-        echo "Kernel Version: $KERNEL_VER"
-        echo "GKI KMI Match : $KERNEL_KMI"
-
-        echo "KERNEL_VER=$KERNEL_VER" >> $GITHUB_ENV
-        echo "KERNEL_KMI=$KERNEL_KMI" >> $GITHUB_ENV
-        echo "ANDROID_VER=$ANDROID_VER" >> $GITHUB_ENV
-        
-        cd .. && rm -rf info_workspace
-        set -e
-        echo "::endgroup::"
-
-    # ────────────────────────────────────────────
-    - name: ⚡ Dual LKM Injection (KSUN v3.2.0 + Pure SUSFS.ko Patch)
-    # ────────────────────────────────────────────
-      run: |
-        echo "::group::Dual Module Injection"
-        
-        # سحب الحزمة الكاملة التي تحتوي على الموديولات المنفصلة بالكامل
-        curl -L "https://github.com/zzh20188/GKI_KernelSU_SUSFS/releases/download/v3.2.0/AnyKernel3-KernelSU-Next-v3.2.0-susfs-allGKI.zip" -o ksu_v320_pack.zip
-        
-        mkdir -p modules_extracted
-        unzip -j ksu_v320_pack.zip 'modules/ksu.ko' 'ksu.ko' 'modules/susfs.ko' 'susfs.ko' 'modules/ksu_lkm.ko' -d modules_extracted/ 2>/dev/null || true
-        
-        # تعيين مسارات الملفات المستخرجة الحية
-        KSUN_LKM=$(find modules_extracted -type f \( -name 'ksu.ko' -o -name 'ksu_lkm.ko' \) | head -1)
-        SUSFS_LKM=$(find modules_extracted -type f -name 'susfs.ko' | head -1)
-        
-        if [ -z "$KSUN_LKM" ] || [ ! -s "$KSUN_LKM" ]; then
-          echo "::error::❌ Could not find valid ksu.ko module."
-          exit 1
-        fi
-        
-        if [ -z "$SUSFS_LKM" ] || [ ! -s "$SUSFS_LKM" ]; then
-          echo "⚠️ susfs.ko missing in zip, pulling standalone kernel patch module..."
-          curl -L "https://raw.githubusercontent.com/zzh20188/GKI_KernelSU_SUSFS/main/susfs.ko" -o modules_extracted/susfs.ko || true
-          SUSFS_LKM="modules_extracted/susfs.ko"
-        fi
-
-        mkdir -p patch_workspace && cp stock_target.img patch_workspace/boot.img && cd patch_workspace
+        mkdir -p workspace && cp boot.img workspace/ && cd workspace
         ../magiskboot unpack boot.img
         
-        if [ -f ramdisk.cpio ]; then
-          echo "→ Injecting BOTH ksu.ko (v3.2.0) and susfs.ko (Kernel Patch) into Ramdisk..."
-          cp "../$KSUN_LKM" ksu.ko
-          cp "../$SUSFS_LKM" susfs.ko
-          
-          # كتابة أوامر الحقن المزدوجة المتتالية لتعديل الرام ديسك بشكل حقيقي وصارم
-          cat << EOF > patch_cfg.txt
-          add 0644 ksu.ko ksu.ko
-          add 0644 susfs.ko susfs.ko
-        EOF
-          
-          ../magiskboot cpio ramdisk.cpio -f patch_cfg.txt
-          rm -f patch_cfg.txt ksu.ko susfs.ko
-          
-          # إعادة كبس ملف الـ boot.img المعدل كلياً بباتش الكيرنال والـ root
-          ../magiskboot repack boot.img ../ksu_patched_boot.img
-        else
-          echo "::error::❌ Ramdisk not found. Dual LKM patch cannot be completed."
+        if [ ! -f kernel ]; then
+          echo "::error::❌ No 'kernel' file found! Did you provide an init_boot.img instead of boot.img?"
           exit 1
         fi
         
-        cd .. && rm -rf patch_workspace
-        ls -lh ksu_patched_boot.img
-        echo "✅ Dual Injection Complete: KSUN v3.2.0 + SUSFS Kernel Patch are Active!"
+        # استخراج إصدار الـ KMI من الكيرنال الاستوك
+        KERNEL_VER=$(strings kernel | grep -oE "Linux version [0-9]+\.[0-9]+" | head -1 | cut -d' ' -f3)
+        if [ -z "$KERNEL_VER" ]; then
+          KERNEL_VER="6.12" # Fallback للموبايل بتاعك
+        fi
+        ANDROID_VER="android16" # Fallback لـ Spinel
+        
+        KMI_FULL=$(strings kernel | grep -oE "[0-9]+\.[0-9]+-android[0-9]+" | head -1)
+        if [ -z "$KMI_FULL" ]; then
+          KMI_FULL="${KERNEL_VER}-${ANDROID_VER}"
+        fi
+        
+        echo "Detected KMI: $KMI_FULL"
+        echo "KMI_FULL=$KMI_FULL" >> $GITHUB_ENV
+        cd ..
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: 📲 Download KSUN 3.2.0 Manager APK
+    - name: ⚡ Fetch Pre-Patched GKI & Swap Kernel (SUSFS + KSUN)
     # ────────────────────────────────────────────
       run: |
-        echo "::group::Download KSUN 3.2.0 Manager"
-        mkdir -p managers
-        curl -L "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.2.0/KernelSU-Next_v3.2.0_manager.apk" -o "managers/KernelSU-Next_Manager_v3.2.0.apk" || {
-          curl -L "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.2.0/manager-release.apk" -o "managers/KernelSU-Next_Manager_v3.2.0.apk"
-        }
-        ls -lh managers/
+        echo "::group::GKI Swap Process"
+        cd workspace
+        
+        echo "🔍 Searching for Pre-compiled KSUN+SUSFS GKI for [$KMI_FULL]..."
+        
+        # سحب أحدث إصدار من ريبو GKI_KernelSU_SUSFS
+        ASSET_URL=$(curl -s https://api.github.com/repos/zzh20188/GKI_KernelSU_SUSFS/releases/latest | jq -r ".assets[] | select(.name | contains(\"${KMI_FULL}\")) | .browser_download_url" | head -1)
+        
+        if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" == "null" ]; then
+          echo "⚠️ Not found in zzh20188, checking WildKernels..."
+          ASSET_URL=$(curl -s https://api.github.com/repos/WildKernels/GKI_KernelSU_SUSFS/releases/latest | jq -r ".assets[] | select(.name | contains(\"${KMI_FULL}\")) | .browser_download_url" | head -1)
+        fi
+        
+        if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" == "null" ]; then
+           echo "::error::❌ Could not find a pre-patched GKI kernel for $KMI_FULL!"
+           exit 1
+        fi
+        
+        echo "⬇️ Downloading GKI Pack from: $ASSET_URL"
+        curl -L --progress-bar "$ASSET_URL" -o gki_pack.zip
+        
+        # استخراج الكيرنال الجديد المدموج فيه الباتش
+        unzip -j gki_pack.zip 'Image' -d ./ 2>/dev/null || unzip -j gki_pack.zip 'kernel' -d ./ 2>/dev/null
+        
+        if [ -f "Image" ]; then
+          mv Image kernel
+          echo "✅ Kernel replaced with Pre-Patched GKI (SUSFS + KSUN)."
+        else
+          echo "::error::❌ Could not extract 'Image' from the downloaded ZIP."
+          exit 1
+        fi
+        
+        # لو الكيرنال الجديد معاه موديولات (LKM) إضافية، هنحقنها بالمرة عشان نضمن الـ Root
+        if unzip -l gki_pack.zip | grep -q '\.ko$'; then
+          echo "💉 Injecting associated .ko modules into Ramdisk..."
+          mkdir -p modules && unzip -j gki_pack.zip '*.ko' -d modules/
+          for ko_file in modules/*.ko; do
+            ko_name=$(basename "$ko_file")
+            cp "$ko_file" "$ko_name"
+            echo "add 0644 $ko_name $ko_name" >> patch_cfg.txt
+          done
+          ../magiskboot cpio ramdisk.cpio -f patch_cfg.txt
+        fi
+        
+        # إعادة الكبس (Repack)
+        ../magiskboot repack boot.img ../ksu_susfs_boot.img
+        cd ..
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: 🛡 SUSFS Module
-      if: inputs.include_susfs_module == 'true'
-    # ────────────────────────────────────────────
-      run: |
-        set +e
-        mkdir -p modules
-        URL=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest \
-          | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)
-        [ -n "$URL" ] && [ "$URL" != "null" ] \
-          && curl -sL "$URL" -o modules/ksu_module_susfs.zip && echo "✅ SUSFS Module OK" \
-          || echo "⚠️ SUSFS Module not found"
-
-    # ────────────────────────────────────────────
-    - name: 🔀 ZygiskNext + Shamiko
-      if: inputs.include_zygisk == 'true'
-    # ────────────────────────────────────────────
-      run: |
-        set +e
-        mkdir -p modules
-        Z=$(curl -s https://api.github.com/repos/Dr-TSNG/ZygiskNext/releases/latest \
-          | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)
-        [ -n "$Z" ] && curl -sL "$Z" -o modules/ZygiskNext.zip && echo "✅ ZygiskNext OK"
-        S=$(curl -s https://api.github.com/repos/LSPosed/LSPosed.github.io/releases/latest \
-          | jq -r '.assets[] | select(.name | test("[Ss]hamiko")) | .browser_download_url' | head -1)
-        [ -n "$S" ] && curl -sL "$S" -o modules/Shamiko.zip && echo "✅ Shamiko OK"
-
-    # ────────────────────────────────────────────
-    - name: 🧩 LSPosed
-      if: inputs.include_lsposed == 'true'
-    # ────────────────────────────────────────────
-      run: |
-        set +e
-        mkdir -p modules
-        URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest \
-          | jq -r '.assets[] | select(.name | test("[Ll][Ss][Pp]osed.*[Zz]ygisk")) | .browser_download_url' | head -1)
-        [ -n "$URL" ] && curl -sL "$URL" -o modules/LSPosed.zip && echo "✅ LSPosed OK"
-
-    # ────────────────────────────────────────────
-    - name: 📤 Upload — Patched Boot + Managers
+    - name: 📤 Upload Patched Boot
     # ────────────────────────────────────────────
       uses: actions/upload-artifact@v4
       with:
-        name: KSUN-v3.2.0-SUSFS-Injected-[${{ env.KERNEL_KMI }}]
-        path: |
-          ksu_patched_boot.img
-          managers/
+        name: Boot-GKI-Swap-KSUN-SUSFS-[${{ env.KMI_FULL }}]
+        path: ksu_susfs_boot.img
         retention-days: 7
-
-    - name: 📤 Upload — Modules
-      if: inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: KSUN-v3.2.0-Modules-Pack
-        path: modules/
-        retention-days: 7
-
-    # ────────────────────────────────────────────
-    - name: 📋 Summary
-      if: always()
-    # ────────────────────────────────────────────
-      run: |
-        cat << EOF >> $GITHUB_STEP_SUMMARY
-        ## 🔧 KSU Boot Patcher (KSUN v3.2.0 + Pure SUSFS.ko Patch)
-
-        > 🚀 **الباتش المزدوج الاحترافي:** تم حقن الرام ديسك بملفين منفصلين: \`ksu.ko\` لإدارة الـ Root بصلاحيات إصدار v3.2.0، وملف \`susfs.ko\` كـ Kernel Patch رسمي متكامل لضمان تخطي الحمايات الحية $100\%$.
-
-        | البيانات | القيمة المستخرجة الحية |
-        |---|---|
-        | **KSUN Version** | v3.2.0 Fixed |
-        | **Kernel Patch** | Embedded susfs.ko Engine |
-        | **Kernel Version** | $KERNEL_VER |
-        | **Kernel KMI** | $KERNEL_KMI |
-
-        ### ⚡ Flash Commands
-        \`\`\`bash
-        fastboot flash boot ksu_patched_boot.img
-        fastboot reboot
-        \`\`\`
-
-        ### 🛠️ Module Flash Order
-        1. \`ksu_module_susfs.zip\` (Userspace module)
-        2. \`ZygiskNext.zip\`
-        3. \`Shamiko.zip\`
-        4. \`LSPosed.zip\`
-        5. **عمل ريبوت للموبايل**
-        EOF
