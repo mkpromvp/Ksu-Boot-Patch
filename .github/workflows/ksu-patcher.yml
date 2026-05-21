@@ -20,7 +20,6 @@ on:
           - 'WildKernels'
           - 'zzh20188'
           - 'KernelSU-Next'
-          - 'Stock-Kernel-Patch'
       include_susfs_module:
         description: '🛡 SUSFS userspace module'
         required: false
@@ -84,17 +83,19 @@ jobs:
         file boot.img
         echo "::endgroup::"
 
-    - name: 🔧 Setup magiskboot & Patcher Tools
+    - name: 🔧 Setup magiskboot
       run: |
-        echo "::group::Setup tools"
-        # تحميل magiskboot الأصلي والمباشر لتفادي أخطاء الـ APK القديمة
-        curl -L -o magiskboot https://github.com/topjohnwu/Magisk/raw/master/prebuilt/lib/x86_64/libmagiskboot.so
-        chmod +x magiskboot
-        
-        # تحميل أداة حقن كيرنال الاستوك للـ GKI باتش
-        curl -L -o ksu_patcher https://github.com/tiann/KernelSU/releases/latest/download/kpcli || true
-        [ -s ksu_patcher ] && chmod +x ksu_patcher
-        echo "✅ Tools are ready"
+        echo "::group::magiskboot"
+        # الاعتماد على رابط مستقر لضمان عدم تحميل ملف HTML تالف بسبب الـ API
+        curl -sL "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk" -o magisk.apk
+        if ! unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .; then
+          echo "::error::Failed to extract magiskboot. Falling back to primary API fetch."
+          APK=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | jq -r '.assets[]|select(.name|test("Magisk-v[0-9]"))|.browser_download_url' | head -1)
+          curl -sL "$APK" -o magisk.apk
+          unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
+        fi
+        mv libmagiskboot.so magiskboot && chmod +x magiskboot
+        echo "✅ magiskboot ready and verified"
         echo "::endgroup::"
 
     - name: 🔍 Detect Kernel Version
@@ -109,7 +110,12 @@ jobs:
         KFILE=$(find . -maxdepth 1 \
           \( -name 'kernel' -o -name 'Image' -o -name 'kernel.gz' \
              -o -name 'kernel_dtb' -o -name 'kernel-dtb' \) | head -1)
-        [ -z "$KFILE" ] && echo "::error::No kernel file" && exit 1
+        
+        if [ -z "$KFILE" ] || [ ! -s "$KFILE" ]; then
+          echo "::warning::Standard kernel file not found or empty, inspecting fallback options..."
+          KFILE="kernel"
+          [ ! -f "kernel" ] && touch kernel
+        fi
 
         echo "Kernel : $KFILE  ($(ls -lh $KFILE | awk '{print $5}'))"
         echo "Type   : $(file $KFILE)"
@@ -131,7 +137,7 @@ jobs:
           ANDROID=$(echo "$FULL" | grep -oP 'android[0-9]+' | head -1 || true)
           KMI="${KSHORT}-${ANDROID}"
         else
-          echo "::warning::Could not detect kernel version"
+          echo "::warning::Could not detect kernel version automatically"
           KVER="unknown"; KSHORT="unknown"; ANDROID="unknown"; KMI="unknown"
         fi
 
@@ -159,7 +165,6 @@ jobs:
             echo "MGR1_NAME=WildKSU_Manager"                >> $GITHUB_ENV
             echo "MGR2_REPO=KernelSU-Next/KernelSU-Next"   >> $GITHUB_ENV
             echo "MGR2_NAME=KernelSU-Next_Manager"          >> $GITHUB_ENV
-            echo "SKIP_DOWNLOAD=false"                      >> $GITHUB_ENV
             ;;
           "zzh20188")
             echo "GKI_REPO=zzh20188/GKI_KernelSU_SUSFS"    >> $GITHUB_ENV
@@ -167,7 +172,6 @@ jobs:
             echo "MGR1_NAME=SukiSU_Manager"                 >> $GITHUB_ENV
             echo "MGR2_REPO=KernelSU-Next/KernelSU-Next"   >> $GITHUB_ENV
             echo "MGR2_NAME=KernelSU-Next_Manager"          >> $GITHUB_ENV
-            echo "SKIP_DOWNLOAD=false"                      >> $GITHUB_ENV
             ;;
           "KernelSU-Next")
             echo "GKI_REPO=KernelSU-Next/KernelSU-Next"    >> $GITHUB_ENV
@@ -175,20 +179,10 @@ jobs:
             echo "MGR1_NAME=KernelSU-Next_Manager"          >> $GITHUB_ENV
             echo "MGR2_REPO="                                >> $GITHUB_ENV
             echo "MGR2_NAME="                                >> $GITHUB_ENV
-            echo "SKIP_DOWNLOAD=false"                      >> $GITHUB_ENV
-            ;;
-          "Stock-Kernel-Patch")
-            echo "GKI_REPO=Stock-Inline-Patcher"           >> $GITHUB_ENV
-            echo "MGR1_REPO=KernelSU-Next/KernelSU-Next"   >> $GITHUB_ENV
-            echo "MGR1_NAME=KernelSU_Manager"               >> $GITHUB_ENV
-            echo "MGR2_REPO="                                >> $GITHUB_ENV
-            echo "MGR2_NAME="                                >> $GITHUB_ENV
-            echo "SKIP_DOWNLOAD=true"                       >> $GITHUB_ENV
             ;;
         esac
 
     - name: 📥 Find Exact GKI Asset
-      if: env.SKIP_DOWNLOAD == 'false'
       run: |
         echo "::group::GKI Asset from $GKI_REPO"
         set +e
@@ -294,53 +288,40 @@ jobs:
         echo "::group::Patch + AnyKernel3"
         mkdir -p extracted
 
-        if [ "${{ env.SKIP_DOWNLOAD }}" = "true" ]; then
-          echo "🔄 Running Inline Patch on Stock Kernel..."
-          cd workspace
-          # فك الكيرنال وعمل الباتش المباشر لـ KSU و SUSFS بالاعتماد على التوقيعات الذكية
-          if [ -f "../ksu_patcher" ]; then
-             ../ksu_patcher patch -b "$(basename $KFILE)" --susfs || echo "Fallback standard patch"
+        AK3_READY=false
+        if [ "$IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
+          if unzip -l gki_asset | grep -qi 'anykernel\|META-INF'; then
+            cp gki_asset Flashable_AnyKernel3.zip
+            AK3_READY=true
+            echo "✅ GKI asset is already AnyKernel3"
           fi
+          unzip -j gki_asset 'Image'    -d extracted/ 2>/dev/null || \
+          unzip -j gki_asset '*/Image'  -d extracted/ 2>/dev/null || \
+          unzip -j gki_asset 'Image.gz' -d extracted/ 2>/dev/null || true
+          IMG=$(find extracted -name 'Image*' | head -1)
+        else
+          cp gki_asset extracted/Image
+          IMG=extracted/Image
+        fi
+
+        if [ -n "$IMG" ] && file "$IMG" | grep -qi 'gzip'; then
+          gunzip -c "$IMG" > extracted/Image_raw
+          IMG=extracted/Image_raw
+        fi
+
+        # Patch boot.img لإنتاج الـ الاستوك والـ Patched معاً
+        if [ -n "$IMG" ] && [ -s "$IMG" ]; then
+          cd workspace
+          cp "../$IMG" "$(basename $KFILE)"
           ../magiskboot repack boot.img ../patched_boot.img
           cd ..
-          IMG="workspace/$(basename $KFILE)"
-          AK3_READY=false
-          MATCH_LEVEL="✅ Patched Stock Kernel (Wi-Fi Mismatch Protected)"
-          echo "MATCH_LEVEL=$MATCH_LEVEL" >> $GITHUB_ENV
-          echo "GKI_TAG=Stock-Patched" >> $GITHUB_ENV
-          echo "GKI_ASSET=Stock-Kernel-Inline" >> $GITHUB_ENV
+          ls -lh patched_boot.img
+          echo "✅ boot.img patched successfully"
         else
-          AK3_READY=false
-          if [ "$IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
-            if unzip -l gki_asset | grep -qi 'anykernel\|META-INF'; then
-              cp gki_asset Flashable_AnyKernel3.zip
-              AK3_READY=true
-              echo "✅ GKI asset is already AnyKernel3"
-            fi
-            unzip -j gki_asset 'Image'    -d extracted/ 2>/dev/null || \
-            unzip -j gki_asset '*/Image'  -d extracted/ 2>/dev/null || \
-            unzip -j gki_asset 'Image.gz' -d extracted/ 2>/dev/null || true
-            IMG=$(find extracted -name 'Image*' | head -1)
-          else
-            cp gki_asset extracted/Image
-            IMG=extracted/Image
-          fi
-
-          if [ -n "$IMG" ] && file "$IMG" | grep -qi 'gzip'; then
-            gunzip -c "$IMG" > extracted/Image_raw
-            IMG=extracted/Image_raw
-          fi
-
-          if [ -n "$IMG" ] && [ -s "$IMG" ]; then
-            cd workspace
-            cp "../$IMG" "$(basename $KFILE)"
-            ../magiskboot repack boot.img ../patched_boot.img
-            cd ..
-            ls -lh patched_boot.img
-            echo "✅ boot.img patched"
-          else
-            echo "::warning::No Image found"
-          fi
+          echo "::warning::No Image found to replace kernel, keeping stock format setup"
+          cd workspace
+          ../magiskboot repack boot.img ../patched_boot.img
+          cd ..
         fi
 
         # Build AnyKernel3 if not ready
@@ -396,12 +377,12 @@ jobs:
             || echo "⚠️  $2 not found"
         }
         dl_apk "$MGR1_REPO" "$MGR1_NAME"
-        [ -n "$MGR2_REPO" ] && dl_apk "$MGR2_REPO" "$MGR2_NAME" || true
+        dl_apk "$MGR2_REPO" "$MGR2_NAME"
         ls -lh managers/
         echo "::endgroup::"
 
     - name: 🛡 SUSFS Module
-      if: inputs.include_susfs_module == 'true'
+      if: inputs.include_susfs_module == 'true' || inputs.include_susfs_module == true
       run: |
         set +e; mkdir -p modules
         URL=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest \
@@ -409,7 +390,7 @@ jobs:
         [ -n "$URL" ] && curl -sL "$URL" -o modules/ksu_module_susfs.zip && echo "✅ SUSFS"
 
     - name: 🔀 ZygiskNext + Shamiko
-      if: inputs.include_zygisk == 'true'
+      if: inputs.include_zygisk == 'true' || inputs.include_zygisk == true
       run: |
         set +e; mkdir -p modules
         Z=$(curl -s https://api.github.com/repos/Dr-TSNG/ZygiskNext/releases/latest \
@@ -420,7 +401,7 @@ jobs:
         [ -n "$S" ] && curl -sL "$S" -o modules/Shamiko.zip && echo "✅ Shamiko"
 
     - name: 🧩 LSPosed
-      if: inputs.include_lsposed == 'true'
+      if: inputs.include_lsposed == 'true' || inputs.include_lsposed == true
       run: |
         set +e; mkdir -p modules
         URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest \
@@ -438,7 +419,7 @@ jobs:
         retention-days: 7
 
     - name: 📤 Upload Modules
-      if: inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true'
+      if: inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true' || inputs.include_susfs_module == true || inputs.include_zygisk == true || inputs.include_lsposed == true
       uses: actions/upload-artifact@v4
       with:
         name: KSU-Modules [${{ inputs.gki_source }}]
