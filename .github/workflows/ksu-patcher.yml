@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       boot_img_url:
-        description: '🔗 رابط تحميل مباشر لملف boot.img أو init_boot.img'
+        description: '🔗 رابط تحميل مباشر لملف boot.img'
         required: true
         type: string
 
@@ -12,47 +12,38 @@ jobs:
   patch:
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Download Image
+      - name: 📥 Download & Setup
         run: |
           curl -L -o boot.img "${{ inputs.boot_img_url }}"
-          if [ ! -s boot.img ]; then echo "Error: Download failed"; exit 1; fi
+          curl -L -o magiskboot https://github.com/topjohnwu/Magisk/raw/master/prebuilt/lib/x86_64/libmagiskboot.so
+          chmod +x magiskboot
 
-      - name: 🔧 Setup & Patch
+      - name: 🔧 Patch & Build
         run: |
-          # تحميل magiskboot
-          curl -sL https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-v27.0.apk -o magisk.apk
-          unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d . && mv libmagiskboot.so magiskboot && chmod +x magiskboot
-          
-          # فك الملف
           mkdir workspace && mv boot.img workspace/ && cd workspace
           ../magiskboot unpack boot.img
           
-          # معالجة ذكية للـ KMI لتجنب خطأ 12.30
-          # البحث عن السلسلة الكاملة ثم استخراج 6.12 فقط
-          KERNEL_VERSION=$(strings kernel | grep -m1 -oE "Linux version [0-9]+\.[0-9]+\.[0-9]+" | awk '{print $3}' | cut -d. -f1,2)
-          ANDROID_VERSION=$(strings kernel | grep -m1 -oE "android[0-9]+")
-          KMI="${KERNEL_VERSION}-${ANDROID_VERSION}"
-          echo "✅ Detected KMI: $KMI"
-          echo "KMI=$KMI" >> $GITHUB_ENV
-
-          # تحميل الـ Patch المضمون من WildKernels
-          URL="https://github.com/WildKernels/GKI_KernelSU_SUSFS/releases/latest/download/AnyKernel3-${KMI}.zip"
+          # استخراج الـ KMI وتصحيح الصيغة لتطابق المطور
+          # السكربت السابق كان يخرج 12.30، سنقوم بإضافة 6. ليصبح 6.12.30
+          KMI_RAW=$(strings kernel | grep -m1 -oE "[0-9]+\.[0-9]+\.[0-9]+-android[0-9]+")
+          KMI="6.${KMI_RAW}"
+          echo "✅ Corrected KMI: $KMI"
+          
+          # رابط تحميل الملف الصحيح من الإصدار v2.0.0-r20
+          URL="https://github.com/WildKernels/GKI_KernelSU_SUSFS/releases/download/v2.0.0-r20/AnyKernel3-${KMI}-2025-07-AnyKernel3.zip"
           echo "⬇️ Downloading: $URL"
           curl -L -o gki_pack.zip "$URL"
           
-          # استبدال الـ Image
+          # فك وتجميع
           unzip -j gki_pack.zip 'Image' -d .
           mv Image kernel
-          
-          # إعادة التجميع
           ../magiskboot repack boot.img ../patched_boot.img
           cp gki_pack.zip ../Flashable_AnyKernel3.zip
-          cd ..
 
       - name: 📤 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Patched-Kernel-${{ env.KMI }}
+          name: Patched-Kernel-Result
           path: |
             patched_boot.img
             Flashable_AnyKernel3.zip
