@@ -86,16 +86,18 @@ jobs:
     - name: 🔧 Setup magiskboot
       run: |
         echo "::group::magiskboot"
-        # الاعتماد على رابط مستقر لضمان عدم تحميل ملف HTML تالف بسبب الـ API
-        curl -sL "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk" -o magisk.apk
-        if ! unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .; then
-          echo "::error::Failed to extract magiskboot. Falling back to primary API fetch."
-          APK=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | jq -r '.assets[]|select(.name|test("Magisk-v[0-9]"))|.browser_download_url' | head -1)
+        # محاولة التحميل برابط مباشر مستقر أولاً لتجنب الـ Rate Limit الخاص بالـ API وحظر الـ HTML
+        if ! curl -sL "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk" -o magisk.apk || [ $(stat -c%s magisk.apk) -lt 100000 ]; then
+          echo "⚠️ Direct link failed or returned corrupt file. Fetching via GitHub API..."
+          APK=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+            | jq -r '.assets[]|select(.name|test("Magisk-v[0-9]"))|.browser_download_url' \
+            | head -1)
           curl -sL "$APK" -o magisk.apk
-          unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
         fi
+        
+        unzip -jq magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
         mv libmagiskboot.so magiskboot && chmod +x magiskboot
-        echo "✅ magiskboot ready and verified"
+        echo "✅ magiskboot is verified and ready"
         echo "::endgroup::"
 
     - name: 🔍 Detect Kernel Version
@@ -110,12 +112,7 @@ jobs:
         KFILE=$(find . -maxdepth 1 \
           \( -name 'kernel' -o -name 'Image' -o -name 'kernel.gz' \
              -o -name 'kernel_dtb' -o -name 'kernel-dtb' \) | head -1)
-        
-        if [ -z "$KFILE" ] || [ ! -s "$KFILE" ]; then
-          echo "::warning::Standard kernel file not found or empty, inspecting fallback options..."
-          KFILE="kernel"
-          [ ! -f "kernel" ] && touch kernel
-        fi
+        [ -z "$KFILE" ] && echo "::error::No kernel file found" && exit 1
 
         echo "Kernel : $KFILE  ($(ls -lh $KFILE | awk '{print $5}'))"
         echo "Type   : $(file $KFILE)"
@@ -137,7 +134,7 @@ jobs:
           ANDROID=$(echo "$FULL" | grep -oP 'android[0-9]+' | head -1 || true)
           KMI="${KSHORT}-${ANDROID}"
         else
-          echo "::warning::Could not detect kernel version automatically"
+          echo "::warning::Could not detect kernel version"
           KVER="unknown"; KSHORT="unknown"; ANDROID="unknown"; KMI="unknown"
         fi
 
@@ -288,6 +285,7 @@ jobs:
         echo "::group::Patch + AnyKernel3"
         mkdir -p extracted
 
+        # الاحتفاظ بنسخة الاستوك الأصلية كاملة داخل خطوتك الحالية
         AK3_READY=false
         if [ "$IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
           if unzip -l gki_asset | grep -qi 'anykernel\|META-INF'; then
@@ -309,22 +307,22 @@ jobs:
           IMG=extracted/Image_raw
         fi
 
-        # Patch boot.img لإنتاج الـ الاستوك والـ Patched معاً
+        # تنفيذ التعديل (Patch) بشكل صريح وبدون المساس بالـ Stock الأساسي
         if [ -n "$IMG" ] && [ -s "$IMG" ]; then
           cd workspace
           cp "../$IMG" "$(basename $KFILE)"
           ../magiskboot repack boot.img ../patched_boot.img
           cd ..
           ls -lh patched_boot.img
-          echo "✅ boot.img patched successfully"
+          echo "✅ boot.img patched with new GKI Image"
         else
-          echo "::warning::No Image found to replace kernel, keeping stock format setup"
+          echo "::error::No valid Image found to patch. Executing fallback repack."
           cd workspace
           ../magiskboot repack boot.img ../patched_boot.img
           cd ..
         fi
 
-        # Build AnyKernel3 if not ready
+        # بناء الـ AnyKernel3 من الكيرنال المستخرج
         if [ "$AK3_READY" = "false" ] && [ -n "$IMG" ] && [ -s "$IMG" ]; then
           echo "Building AnyKernel3..."
           git clone --depth=1 -q https://github.com/osm0sis/AnyKernel3 ak3_tmpl
@@ -382,7 +380,7 @@ jobs:
         echo "::endgroup::"
 
     - name: 🛡 SUSFS Module
-      if: inputs.include_susfs_module == 'true' || inputs.include_susfs_module == true
+      if: inputs.include_susfs_module == true || inputs.include_susfs_module == 'true'
       run: |
         set +e; mkdir -p modules
         URL=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest \
@@ -390,7 +388,7 @@ jobs:
         [ -n "$URL" ] && curl -sL "$URL" -o modules/ksu_module_susfs.zip && echo "✅ SUSFS"
 
     - name: 🔀 ZygiskNext + Shamiko
-      if: inputs.include_zygisk == 'true' || inputs.include_zygisk == true
+      if: inputs.include_zygisk == true || inputs.include_zygisk == 'true'
       run: |
         set +e; mkdir -p modules
         Z=$(curl -s https://api.github.com/repos/Dr-TSNG/ZygiskNext/releases/latest \
@@ -401,7 +399,7 @@ jobs:
         [ -n "$S" ] && curl -sL "$S" -o modules/Shamiko.zip && echo "✅ Shamiko"
 
     - name: 🧩 LSPosed
-      if: inputs.include_lsposed == 'true' || inputs.include_lsposed == true
+      if: inputs.include_lsposed == true || inputs.include_lsposed == 'true'
       run: |
         set +e; mkdir -p modules
         URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest \
@@ -419,7 +417,7 @@ jobs:
         retention-days: 7
 
     - name: 📤 Upload Modules
-      if: inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true' || inputs.include_susfs_module == true || inputs.include_zygisk == true || inputs.include_lsposed == true
+      if: inputs.include_susfs_module == true || inputs.include_zygisk == true || inputs.include_lsposed == true || inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: KSU-Modules [${{ inputs.gki_source }}]
