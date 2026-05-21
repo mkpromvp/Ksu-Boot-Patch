@@ -37,12 +37,7 @@ SUSFS (SUS File System) is a **kernel-level** root hiding patch. It hides root t
 
 ## 🚀 How to Use
 
-### Step 1 — Create the repository
-
-Create a new GitHub repository and place the workflow file at:
-```
-.github/workflows/ksu-patcher.yml
-```
+### Step 1 — fork this repository
 
 ### Step 2 — Get a direct link to your stock boot.img
 
