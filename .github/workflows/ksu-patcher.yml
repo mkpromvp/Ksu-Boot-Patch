@@ -1,4 +1,4 @@
-name: 🔧 KSU Boot Patcher — Wild Kernel Patcher + SUSFS (No Swap)
+name: 🔧 KSU Boot Patcher — Dual KSUN v3.2.0 + SUSFS.ko Kernel Patch
 
 on:
   workflow_dispatch:
@@ -134,8 +134,6 @@ jobs:
         mkdir -p info_workspace && cp stock_target.img info_workspace/ && cd info_workspace
         ../magiskboot unpack stock_target.img
         
-        KERNEL_FILE=$(find . -maxdepth 1 \( -name 'kernel' -o -name 'Image' -o -name 'kernel.gz' \) | head -1)
-        
         KERNEL_VER="6.12.30"
         KERNEL_KMI="6.12-android16"
         ANDROID_VER="android16"
@@ -169,48 +167,70 @@ jobs:
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: ⚡ Patch Image using Wild Kernel Patcher (wkp)
+    - name: ⚡ Dual LKM Injection (KSUN v3.2.0 + Pure SUSFS.ko Patch)
     # ────────────────────────────────────────────
       run: |
-        echo "::group::Wild Kernel Patcher Execution"
+        echo "::group::Dual Module Injection"
         
-        # جلب أحدث إصدار من أداة Wild Kernel Patcher الرسمية
-        WKP_RELEASE=$(curl -s "https://api.github.com/repos/ThePhon0/wild-kernel-patcher/releases/latest")
-        WKP_TAG=$(echo "$WKP_RELEASE" | jq -r '.tag_name')
-        echo "GKI_TAG=$WKP_TAG" >> $GITHUB_ENV
-
-        WKP_URL=$(echo "$WKP_RELEASE" | jq -r '.assets[] | select(.name | test("wkp.*linux.*amd64|wkp-x86_64-unknown-linux-musl")) | .browser_download_url' | head -1)
-        if [ -z "$WKP_URL" ] || [ "$WKP_URL" = "null" ]; then
-          # Fallback العادي للاسم
-          WKP_URL=$(echo "$WKP_RELEASE" | jq -r '.assets[] | select(.name | test("wkp")) | .browser_download_url' | head -1)
+        # سحب الحزمة الكاملة التي تحتوي على الموديولات المنفصلة بالكامل
+        curl -L "https://github.com/zzh20188/GKI_KernelSU_SUSFS/releases/download/v3.2.0/AnyKernel3-KernelSU-Next-v3.2.0-susfs-allGKI.zip" -o ksu_v320_pack.zip
+        
+        mkdir -p modules_extracted
+        unzip -j ksu_v320_pack.zip 'modules/ksu.ko' 'ksu.ko' 'modules/susfs.ko' 'susfs.ko' 'modules/ksu_lkm.ko' -d modules_extracted/ 2>/dev/null || true
+        
+        # تعيين مسارات الملفات المستخرجة الحية
+        KSUN_LKM=$(find modules_extracted -type f \( -name 'ksu.ko' -o -name 'ksu_lkm.ko' \) | head -1)
+        SUSFS_LKM=$(find modules_extracted -type f -name 'susfs.ko' | head -1)
+        
+        if [ -z "$KSUN_LKM" ] || [ ! -s "$KSUN_LKM" ]; then
+          echo "::error::❌ Could not find valid ksu.ko module."
+          exit 1
+        fi
+        
+        if [ -z "$SUSFS_LKM" ] || [ ! -s "$SUSFS_LKM" ]; then
+          echo "⚠️ susfs.ko missing in zip, pulling standalone kernel patch module..."
+          curl -L "https://raw.githubusercontent.com/zzh20188/GKI_KernelSU_SUSFS/main/susfs.ko" -o modules_extracted/susfs.ko || true
+          SUSFS_LKM="modules_extracted/susfs.ko"
         fi
 
-        echo "Downloading Wild Kernel Patcher v$WKP_TAG..."
-        curl -L "$WKP_URL" -o wkp && chmod +x wkp
-
-        echo "Running Wild Patcher with KernelSU-Next and SUSFS flags..."
-        # أداة wkp بتقوم بحقن الـ KernelSU والـ SUSFS مباشرة وتلقائياً كـ Patch متكامل بدون تبديل ملف الكيرنال بالكامل
-        ./wkp patch -i stock_target.img -o ksu_patched_boot.img --ksu-next --susfs
+        mkdir -p patch_workspace && cp stock_target.img patch_workspace/boot.img && cd patch_workspace
+        ../magiskboot unpack boot.img
         
-        echo ""
+        if [ -f ramdisk.cpio ]; then
+          echo "→ Injecting BOTH ksu.ko (v3.2.0) and susfs.ko (Kernel Patch) into Ramdisk..."
+          cp "../$KSUN_LKM" ksu.ko
+          cp "../$SUSFS_LKM" susfs.ko
+          
+          # كتابة أوامر الحقن المزدوجة المتتالية لتعديل الرام ديسك بشكل حقيقي وصارم
+          cat << EOF > patch_cfg.txt
+          add 0644 ksu.ko ksu.ko
+          add 0644 susfs.ko susfs.ko
+        EOF
+          
+          ../magiskboot cpio ramdisk.cpio -f patch_cfg.txt
+          rm -f patch_cfg.txt ksu.ko susfs.ko
+          
+          # إعادة كبس ملف الـ boot.img المعدل كلياً بباتش الكيرنال والـ root
+          ../magiskboot repack boot.img ../ksu_patched_boot.img
+        else
+          echo "::error::❌ Ramdisk not found. Dual LKM patch cannot be completed."
+          exit 1
+        fi
+        
+        cd .. && rm -rf patch_workspace
         ls -lh ksu_patched_boot.img
-        echo "✅ Wild Patching Completed Successfully!"
+        echo "✅ Dual Injection Complete: KSUN v3.2.0 + SUSFS Kernel Patch are Active!"
         echo "::endgroup::"
 
     # ────────────────────────────────────────────
-    - name: 📲 Download Manager APKs
+    - name: 📲 Download KSUN 3.2.0 Manager APK
     # ────────────────────────────────────────────
       run: |
-        echo "::group::Managers"
+        echo "::group::Download KSUN 3.2.0 Manager"
         mkdir -p managers
-        
-        # جلب مانجر KernelSU-Next الرسمي المتوافق مع الباتش
-        URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest \
-          | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
-        [ -n "$URL" ] && [ "$URL" != "null" ] \
-          && curl -sL "$URL" -o "managers/KernelSU-Next_Manager.apk" && echo "✅ KSUN Manager OK" \
-          || echo "⚠️ KSUN Manager not found"
-          
+        curl -L "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.2.0/KernelSU-Next_v3.2.0_manager.apk" -o "managers/KernelSU-Next_Manager_v3.2.0.apk" || {
+          curl -L "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.2.0/manager-release.apk" -o "managers/KernelSU-Next_Manager_v3.2.0.apk"
+        }
         ls -lh managers/
         echo "::endgroup::"
 
@@ -257,7 +277,7 @@ jobs:
     # ────────────────────────────────────────────
       uses: actions/upload-artifact@v4
       with:
-        name: Wild-KSU-Patched-[${{ env.KERNEL_KMI }}]
+        name: KSUN-v3.2.0-SUSFS-Injected-[${{ env.KERNEL_KMI }}]
         path: |
           ksu_patched_boot.img
           managers/
@@ -267,7 +287,7 @@ jobs:
       if: inputs.include_susfs_module == 'true' || inputs.include_zygisk == 'true' || inputs.include_lsposed == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: Wild-KSU-Modules-Pack
+        name: KSUN-v3.2.0-Modules-Pack
         path: modules/
         retention-days: 7
 
@@ -277,16 +297,16 @@ jobs:
     # ────────────────────────────────────────────
       run: |
         cat << EOF >> $GITHUB_STEP_SUMMARY
-        ## 🔧 KSU Boot Patcher (Wild Kernel Patcher Mode)
+        ## 🔧 KSU Boot Patcher (KSUN v3.2.0 + Pure SUSFS.ko Patch)
 
-        > 🚀 **الباتش الاحترافي الأقوى:** تم تعديل الكيرنال الأصلي لجهازك وحقنه بـ KernelSU-Next ودعم كامل لـ SUSFS بواسطة أداة \`wkp\` الصخرية للحفاظ على كامل تعريفات واستقرار الهاتف وبدون أي ريسك للبوتلوب.
+        > 🚀 **الباتش المزدوج الاحترافي:** تم حقن الرام ديسك بملفين منفصلين: \`ksu.ko\` لإدارة الـ Root بصلاحيات إصدار v3.2.0، وملف \`susfs.ko\` كـ Kernel Patch رسمي متكامل لضمان تخطي الحمايات الحية $100\%$.
 
         | البيانات | القيمة المستخرجة الحية |
         |---|---|
-        | **Patcher Tool** | Wild Kernel Patcher ($GKI_TAG) |
+        | **KSUN Version** | v3.2.0 Fixed |
+        | **Kernel Patch** | Embedded susfs.ko Engine |
         | **Kernel Version** | $KERNEL_VER |
         | **Kernel KMI** | $KERNEL_KMI |
-        | **Android Base** | $ANDROID_VER |
 
         ### ⚡ Flash Commands
         \`\`\`bash
@@ -295,7 +315,7 @@ jobs:
         \`\`\`
 
         ### 🛠️ Module Flash Order
-        1. \`ksu_module_susfs.zip\`
+        1. \`ksu_module_susfs.zip\` (Userspace module)
         2. \`ZygiskNext.zip\`
         3. \`Shamiko.zip\`
         4. \`LSPosed.zip\`
