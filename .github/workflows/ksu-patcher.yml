@@ -187,7 +187,7 @@ jobs:
             URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name|test("AnyKernel.*\\.zip|Image$")) | .browser_download_url' | head -1 || true)
           fi
           [ -n "$URL" ] && [ "$URL" != "null" ] || { echo "::error::No matching GKI asset"; exit 1; }
-          curl -L --progress-bar "$URL -o gki_asset
+          curl -L --progress-bar "$URL" -o gki_asset
 
       - name: Patch kernel (ReSukiSU+SUSFS)
         if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
