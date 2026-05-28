@@ -266,7 +266,8 @@ jobs:
       if: inputs.gki_source == 'ReSukiSU+SUSFS'
       run: |
         echo "::group::ReSukiSU — KernelPatch"
-        set +e
+        set -e
+
         echo "MGR1_REPO=SukiSU-Ultra/SukiSU-Ultra" >> "$GITHUB_ENV"
         echo "MGR1_NAME=SukiSU_Manager" >> "$GITHUB_ENV"
         echo "MGR2_REPO=" >> "$GITHUB_ENV"
@@ -282,6 +283,7 @@ jobs:
         echo "SUPERKEY=$SKEY" >> "$GITHUB_ENV"
         echo "$SKEY" > superkey.txt
 
+        echo "Fetching KernelPatch tools..."
         KP_RELEASE=$(curl -s https://api.github.com/repos/bmax121/KernelPatch/releases/latest)
         KPTOOLS_URL=$(echo "$KP_RELEASE" | jq -r '.assets[] | select(.name == "kptools-linux") | .browser_download_url')
         KPIMG_URL=$(echo "$KP_RELEASE" | jq -r '.assets[] | select(.name == "kpimg") | .browser_download_url')
@@ -293,24 +295,35 @@ jobs:
         cp "workspace/$KFILE" kp_work/stock_kernel
 
         if file kp_work/stock_kernel | grep -qi 'gzip\|lzma\|lz4'; then
-          ./magiskboot decompress kp_work/stock_kernel kp_work/stock_kernel_raw 2>/dev/null
+          echo "Decompressing kernel..."
+          ./magiskboot decompress kp_work/stock_kernel kp_work/stock_kernel_raw 2>/dev/null || true
           if [ -s kp_work/stock_kernel_raw ]; then
             mv kp_work/stock_kernel_raw kp_work/stock_kernel
           fi
         fi
 
-        ./kptools -p --image kp_work/stock_kernel --skey "$SKEY" --kpimg kpimg --out kp_work/patched_kernel
+        echo "Patching kernel with KernelPatch..."
+        ./kptools -p \
+          --image kp_work/stock_kernel \
+          --skey "$SKEY" \
+          --kpimg kpimg \
+          --out kp_work/patched_kernel
 
         if [ ! -s kp_work/patched_kernel ]; then
-          echo "::error::KernelPatch failed"
+          echo "::error::KernelPatch failed - patched_kernel not created"
+          ls -la kp_work/
           exit 1
         fi
+
+        echo "✅ Kernel patched successfully"
+        echo "Patched size: $(ls -lh kp_work/patched_kernel | awk '{print $5}')"
 
         cd workspace
         cp "../kp_work/patched_kernel" "$(basename $KFILE)"
         ../magiskboot repack boot.img ../patched_boot.img
         cd ..
-        echo "✅ KernelPatch done"
+
+        echo "✅ boot.img repacked with KernelPatch"
         echo "::endgroup::"
 
     - name: ⚡ Extract Image + Patch boot.img + Build AnyKernel3
@@ -323,6 +336,7 @@ jobs:
           IMG=extracted/Image
         else
           if [ "$IS_ZIP" = "true" ] || file gki_asset | grep -qi 'zip'; then
+            mkdir -p ak3_extracted
             unzip -q gki_asset -d ak3_extracted/
             IMG=$(find ak3_extracted -name 'Image*' | head -1)
           else
@@ -330,15 +344,22 @@ jobs:
             IMG=extracted/Image
           fi
         fi
+
         if [ -n "$IMG" ] && file "$IMG" | grep -qi 'gzip'; then
           gunzip -c "$IMG" > extracted/Image_raw
           IMG=extracted/Image_raw
         fi
-        cd workspace
-        cp "../\( IMG" " \)(basename ${{ env.KFILE }})"
-        ../magiskboot repack boot.img ../patched_boot.img
-        cd ..
-        echo "✅ boot.img patched successfully"
+
+        if [ -n "$IMG" ] && [ -s "$IMG" ]; then
+          cd workspace
+          cp "../\( IMG" " \)(basename ${{ env.KFILE }})"
+          ../magiskboot repack boot.img ../patched_boot.img
+          cd ..
+          echo "✅ boot.img patched successfully"
+        else
+          echo "::error::Failed to process Image"
+          exit 1
+        fi
         echo "::endgroup::"
 
     - name: 📲 Download Manager APKs
@@ -474,6 +495,6 @@ jobs:
           echo "| Kernel Version | \`${{ env.KVER }}\` |"
           echo "| KMI | \`${{ env.KMI }}\` |"
           if [ -n "${{ env.SUPERKEY }}" ]; then
-            echo "| SuperKey | \`${{ env.SUPERKEY }}\` |"
+            echo "| 🔑 SuperKey | \`${{ env.SUPERKEY }}\` |"
           fi
         } >> "$GITHUB_STEP_SUMMARY"
