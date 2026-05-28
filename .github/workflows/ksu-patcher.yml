@@ -75,7 +75,7 @@ jobs:
                 BOOT_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i '^boot' | head -1 || true)
               fi
 
-              [ -n "$BOOT_PATH" ] || { echo "::error::Cannot find boot.img automatically, use zip_boot_path"; exit 1; }
+              [ -n "$BOOT_PATH" ] || { echo "::error::Cannot find boot.img automatically. Use zip_boot_path."; exit 1; }
               unzip -j input_file "$BOOT_PATH" -d ex/
             fi
 
@@ -99,7 +99,6 @@ jobs:
             [ -n "$APK" ] && [ "$APK" != "null" ] || { echo "::error::Cannot get Magisk apk"; exit 1; }
             curl -sL "$APK" -o magisk.apk
           fi
-
           unzip -jq magisk.apk "lib/x86_64/libmagiskboot.so" -d .
           mv libmagiskboot.so magiskboot
           chmod +x magiskboot
@@ -175,7 +174,7 @@ jobs:
               ;;
           esac
 
-      - name: Download GKI asset (for WildKernels/zzh20188)
+      - name: Download GKI asset (WildKernels / zzh20188)
         if: ${{ inputs.gki_source == 'WildKernels' || inputs.gki_source == 'zzh20188' }}
         run: |
           set -e
@@ -192,11 +191,10 @@ jobs:
           fi
 
           [ -n "$URL" ] && [ "$URL" != "null" ] || { echo "::error::No matching GKI asset found"; exit 1; }
-
           curl -L --progress-bar "$URL" -o gki_asset
           echo "GKI_ASSET_URL=$URL" >> "$GITHUB_ENV"
 
-      - name: Patch kernel (ReSukiSU+SUSFS via KernelPatch)
+      - name: Patch kernel (ReSukiSU+SUSFS)
         if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
         run: |
           set -e
@@ -279,7 +277,7 @@ jobs:
 
           [ -s patched_boot.img ] || { echo "::error::patched_boot.img missing"; exit 1; }
 
-      - name: Build flashable AnyKernel3 zip (fixed)
+      - name: Build flashable AnyKernel3 zip (fixed for your error)
         run: |
           set -e
           [ -s out/Image ] || { echo "::error::out/Image missing"; exit 1; }
@@ -290,17 +288,16 @@ jobs:
 
           AK3="AnyKernel3-master"
           [ -d "$AK3" ] || { echo "::error::AnyKernel3 folder not found"; exit 1; }
-
           cp out/Image "$AK3/Image"
 
-          # Critical fix for your exact error: do not keep old hardcoded omap boot path
-          sed -i 's|^block=.*|block=boot|g' "$AK3/anykernel.sh"
+          # Fix old template values that cause: /dev/block/platform/omap/... error
+          sed -i 's|^block=.*|block=auto|g' "$AK3/anykernel.sh"
           sed -i 's|^is_slot_device=.*|is_slot_device=auto|g' "$AK3/anykernel.sh"
           sed -i 's|^do.devicecheck=.*|do.devicecheck=0|g' "$AK3/anykernel.sh"
           sed -i 's|^do.modules=.*|do.modules=0|g' "$AK3/anykernel.sh"
+          sed -i 's|^kernel.string=.*|kernel.string=KSU Patched Kernel by CI|g' "$AK3/anykernel.sh"
 
-          # Safety fallback if template line did not exist
-          grep -q '^block=' "$AK3/anykernel.sh" || echo 'block=boot' >> "$AK3/anykernel.sh"
+          grep -q '^block=' "$AK3/anykernel.sh" || echo 'block=auto' >> "$AK3/anykernel.sh"
           grep -q '^is_slot_device=' "$AK3/anykernel.sh" || echo 'is_slot_device=auto' >> "$AK3/anykernel.sh"
 
           (cd "$AK3" && zip -r9 ../Flashable_AnyKernel3.zip . -x ".git/*" ".github/*")
@@ -403,9 +400,41 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      - name: Upload to GoFile
+        run: |
+          set +e
+          upload_gofile() {
+            local FILE="$1"
+            local LABEL="$2"
+
+            [ -f "$FILE" ] || { echo "Skip missing: $FILE"; return; }
+
+            SERVER=$(curl -sf https://api.gofile.io/servers | jq -r '.data.servers[0].name')
+            if [ -z "$SERVER" ] || [ "$SERVER" = "null" ]; then
+              echo "Could not get GoFile server"
+              return
+            fi
+
+            LINK=$(curl -# -F "file=@${FILE}" "https://${SERVER}.gofile.io/uploadFile" | jq -r '.data.downloadPage')
+            if [ -n "$LINK" ] && [ "$LINK" != "null" ]; then
+              echo "${LABEL}: ${LINK}"
+              echo "GOFILE_LINK_${LABEL}=${LINK}" >> "$GITHUB_ENV"
+            else
+              echo "Upload failed for $FILE"
+            fi
+          }
+
+          upload_gofile "patched_boot.img" "BOOT"
+          upload_gofile "Flashable_AnyKernel3.zip" "ANYKERNEL3"
+
       - name: Summary
         if: always()
         run: |
+          SUSFS_K="${SUSFS_KERNEL:-no}"
+          SUSFS_M="${SUSFS_MODULE:-no}"
+          GO_BOOT="${GOFILE_LINK_BOOT:-N/A}"
+          GO_AK3="${GOFILE_LINK_ANYKERNEL3:-N/A}"
+
           {
             echo "## KSU Boot Patcher Result"
             echo ""
@@ -414,9 +443,11 @@ jobs:
             echo "| Source | \`${{ inputs.gki_source }}\` |"
             echo "| Kernel Version | \`${{ env.KVER }}\` |"
             echo "| KMI | \`${{ env.KMI }}\` |"
-            echo "| SUSFS in kernel strings | \`${{ env.SUSFS_KERNEL || 'no' }}\` |"
-            echo "| SUSFS module downloaded | \`${{ env.SUSFS_MODULE || 'no' }}\` |"
+            echo "| SUSFS in kernel strings | \`${SUSFS_K}\` |"
+            echo "| SUSFS module downloaded | \`${SUSFS_M}\` |"
             if [ -n "${{ env.SUPERKEY }}" ]; then
               echo "| SuperKey | \`${{ env.SUPERKEY }}\` |"
             fi
+            echo "| GoFile BOOT | ${GO_BOOT} |"
+            echo "| GoFile AnyKernel3 | ${GO_AK3} |"
           } >> "$GITHUB_STEP_SUMMARY"
