@@ -48,15 +48,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download input file
+      - name: Download input
         run: |
           set -e
           curl -L --progress-bar "${{ inputs.boot_img_url }}" -o input_file
           ls -lh input_file
           file input_file
-          [ "$(stat -c%s input_file)" -ge 1000000 ] || { echo "::error::Input file too small"; exit 1; }
+          [ "$(stat -c%s input_file)" -ge 1000000 ] || { echo "::error::Input too small"; exit 1; }
 
-      - name: Extract boot.img (if zip)
+      - name: Extract boot.img
         run: |
           set -e
           rm -rf ex
@@ -75,7 +75,7 @@ jobs:
                 BOOT_PATH=$(unzip -l input_file | awk '{print $4}' | grep -i '^boot' | head -1 || true)
               fi
 
-              [ -n "$BOOT_PATH" ] || { echo "::error::Cannot find boot.img automatically. Use zip_boot_path."; exit 1; }
+              [ -n "$BOOT_PATH" ] || { echo "::error::Cannot auto-find boot.img. Use zip_boot_path."; exit 1; }
               unzip -j input_file "$BOOT_PATH" -d ex/
             fi
 
@@ -103,7 +103,7 @@ jobs:
           mv libmagiskboot.so magiskboot
           chmod +x magiskboot
 
-      - name: Detect and unpack kernel
+      - name: Unpack boot and detect kernel
         run: |
           set -e
           mkdir -p workspace out modules managers report
@@ -112,7 +112,7 @@ jobs:
           ../magiskboot unpack boot.img
 
           KFILE=$(find . -maxdepth 1 \( -name kernel -o -name Image -o -name kernel.gz -o -name kernel_dtb -o -name kernel-dtb \) | head -1)
-          [ -n "$KFILE" ] || { echo "::error::No kernel file found after unpack"; exit 1; }
+          [ -n "$KFILE" ] || { echo "::error::No kernel file found"; exit 1; }
 
           KTARGET="$KFILE"
           if file "$KFILE" | grep -qiE 'gzip|compressed|lz4|lzma'; then
@@ -140,7 +140,7 @@ jobs:
           echo "ANDROID=$ANDROID" >> "$GITHUB_ENV"
           echo "KMI=$KMI" >> "$GITHUB_ENV"
 
-      - name: Select source repositories
+      - name: Select source config
         run: |
           set -e
           case "${{ inputs.gki_source }}" in
@@ -174,14 +174,11 @@ jobs:
               ;;
           esac
 
-      - name: Download GKI asset (WildKernels / zzh20188)
+      - name: Download GKI asset
         if: ${{ inputs.gki_source == 'WildKernels' || inputs.gki_source == 'zzh20188' }}
         run: |
           set -e
           RELEASE=$(curl -s "https://api.github.com/repos/${SRC_REPO}/releases" | jq '.[0]')
-          GKI_TAG=$(echo "$RELEASE" | jq -r '.tag_name')
-          echo "GKI_TAG=$GKI_TAG" >> "$GITHUB_ENV"
-
           URL=""
           if [ -n "$KVER" ] && [ "$KVER" != "unknown" ]; then
             URL=$(echo "$RELEASE" | jq -r --arg v "$KVER" --arg a "$ANDROID" '.assets[] | select((.name|contains($v)) and (.name|contains($a)) and (.name|test("AnyKernel|\\.zip|Image$"))) | .browser_download_url' | head -1 || true)
@@ -189,16 +186,13 @@ jobs:
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
             URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name|test("AnyKernel.*\\.zip|Image$")) | .browser_download_url' | head -1 || true)
           fi
-
-          [ -n "$URL" ] && [ "$URL" != "null" ] || { echo "::error::No matching GKI asset found"; exit 1; }
-          curl -L --progress-bar "$URL" -o gki_asset
-          echo "GKI_ASSET_URL=$URL" >> "$GITHUB_ENV"
+          [ -n "$URL" ] && [ "$URL" != "null" ] || { echo "::error::No matching GKI asset"; exit 1; }
+          curl -L --progress-bar "$URL -o gki_asset
 
       - name: Patch kernel (ReSukiSU+SUSFS)
         if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
         run: |
           set -e
-
           if [ -n "${{ inputs.superkey }}" ]; then
             SKEY="${{ inputs.superkey }}"
           else
@@ -210,7 +204,6 @@ jobs:
           KP_RELEASE="$(curl -sfL https://api.github.com/repos/bmax121/KernelPatch/releases/latest)"
           KPTOOLS_URL="$(echo "$KP_RELEASE" | jq -r '.assets[] | select(.name | test("kptools.*linux"; "i")) | .browser_download_url' | head -1)"
           KPIMG_URL="$(echo "$KP_RELEASE" | jq -r '.assets[] | select(.name=="kpimg" or (.name|test("^kpimg[-_.a-zA-Z0-9]*$"))) | .browser_download_url' | head -1)"
-
           [ -n "$KPTOOLS_URL" ] && [ "$KPTOOLS_URL" != "null" ] || { echo "::error::kptools-linux not found"; exit 1; }
           [ -n "$KPIMG_URL" ] && [ "$KPIMG_URL" != "null" ] || { echo "::error::kpimg not found"; exit 1; }
 
@@ -232,14 +225,12 @@ jobs:
             --out kp_work/patched_kernel
 
           [ -s kp_work/patched_kernel ] || { echo "::error::patched_kernel not generated"; exit 1; }
-
           cp kp_work/patched_kernel out/Image
 
           cd workspace
           cp ../kp_work/patched_kernel "$(basename "$KFILE_CLEAN")"
           ../magiskboot repack boot.img ../patched_boot.img
           cd ..
-
           [ -s patched_boot.img ] || { echo "::error::patched_boot.img missing"; exit 1; }
 
       - name: Patch kernel (other sources)
@@ -258,8 +249,7 @@ jobs:
               cp gki_asset src_extract/Image
               IMG="src_extract/Image"
             fi
-
-            [ -n "$IMG" ] && [ -s "$IMG" ] || { echo "::error::No kernel Image found in GKI asset"; exit 1; }
+            [ -n "$IMG" ] && [ -s "$IMG" ] || { echo "::error::No kernel Image in asset"; exit 1; }
 
             if file "$IMG" | grep -qi gzip; then
               gunzip -c "$IMG" > out/Image
@@ -274,10 +264,9 @@ jobs:
           cp ../out/Image "$(basename "$KFILE")"
           ../magiskboot repack boot.img ../patched_boot.img
           cd ..
-
           [ -s patched_boot.img ] || { echo "::error::patched_boot.img missing"; exit 1; }
 
-      - name: Build flashable AnyKernel3 zip (fixed for your error)
+      - name: Build AnyKernel3 (auto detect boot path)
         run: |
           set -e
           [ -s out/Image ] || { echo "::error::out/Image missing"; exit 1; }
@@ -285,27 +274,29 @@ jobs:
           rm -rf AnyKernel3-master ak3.zip Flashable_AnyKernel3.zip
           curl -fL "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip" -o ak3.zip
           unzip -q ak3.zip
-
           AK3="AnyKernel3-master"
           [ -d "$AK3" ] || { echo "::error::AnyKernel3 folder not found"; exit 1; }
+
           cp out/Image "$AK3/Image"
 
-          # Fix old template values that cause: /dev/block/platform/omap/... error
-          sed -i 's|^block=.*|block=auto|g' "$AK3/anykernel.sh"
-          sed -i 's|^is_slot_device=.*|is_slot_device=auto|g' "$AK3/anykernel.sh"
-          sed -i 's|^do.devicecheck=.*|do.devicecheck=0|g' "$AK3/anykernel.sh"
-          sed -i 's|^do.modules=.*|do.modules=0|g' "$AK3/anykernel.sh"
-          sed -i 's|^kernel.string=.*|kernel.string=KSU Patched Kernel by CI|g' "$AK3/anykernel.sh"
+          perl -0777 -i -pe '
+            s/^block=.*/block=boot/m;
+            s/^is_slot_device=.*/is_slot_device=auto/m;
+            s/^do\.devicecheck=.*/do.devicecheck=0/m;
+            s/^do\.modules=.*/do.modules=0/m;
+            s/^kernel\.string=.*/kernel.string=KSU Patched Kernel by CI/m;
+          ' "$AK3/anykernel.sh"
 
-          grep -q '^block=' "$AK3/anykernel.sh" || echo 'block=auto' >> "$AK3/anykernel.sh"
+          grep -q '^block=' "$AK3/anykernel.sh" || echo 'block=boot' >> "$AK3/anykernel.sh"
           grep -q '^is_slot_device=' "$AK3/anykernel.sh" || echo 'is_slot_device=auto' >> "$AK3/anykernel.sh"
 
+          echo "==== anykernel.sh final values ===="
+          grep -E '^(block|is_slot_device|do\.devicecheck|do\.modules|kernel\.string)=' "$AK3/anykernel.sh" || true
+
           (cd "$AK3" && zip -r9 ../Flashable_AnyKernel3.zip . -x ".git/*" ".github/*")
+          [ -s Flashable_AnyKernel3.zip ] || { echo "::error::AnyKernel zip not created"; exit 1; }
 
-          [ -s Flashable_AnyKernel3.zip ] || { echo "::error::Flashable_AnyKernel3.zip not created"; exit 1; }
-          unzip -l Flashable_AnyKernel3.zip | grep -E 'anykernel\.sh|Image' >/dev/null || { echo "::error::AnyKernel zip content invalid"; exit 1; }
-
-      - name: Verify SUSFS presence in kernel
+      - name: Verify SUSFS in kernel
         run: |
           set -e
           SUSFS_KERNEL="no"
@@ -322,7 +313,54 @@ jobs:
             echo "SUSFS in kernel strings: $SUSFS_KERNEL"
           } > report/patch_report.txt
 
-      - name: Download manager APKs
+      - name: Create root boot flasher script
+        run: |
+          cat > flash_boot_root.sh << 'EOF'
+          #!/system/bin/sh
+          # Usage:
+          # su -c sh /sdcard/Download/flash_boot_root.sh /sdcard/Download/patched_boot.img
+          set -e
+          IMG="$1"
+          if [ -z "$IMG" ] || [ ! -f "$IMG" ]; then
+            echo "Usage: sh flash_boot_root.sh /path/to/patched_boot.img"
+            exit 1
+          fi
+
+          SLOT="$(getprop ro.boot.slot_suffix 2>/dev/null || true)"
+          CANDIDATES="
+          /dev/block/by-name/boot${SLOT}
+          /dev/block/bootdevice/by-name/boot${SLOT}
+          /dev/block/by-name/boot
+          /dev/block/bootdevice/by-name/boot
+          /dev/block/platform/*/by-name/boot${SLOT}
+          /dev/block/platform/*/by-name/boot
+          "
+
+          TARGET=""
+          for p in $CANDIDATES; do
+            for real in $p; do
+              if [ -e "$real" ]; then
+                TARGET="$real"
+                break
+              fi
+            done
+            [ -n "$TARGET" ] && break
+          done
+
+          if [ -z "$TARGET" ]; then
+            echo "Cannot find boot partition path automatically."
+            echo "Try: ls -l /dev/block/by-name | grep boot"
+            exit 1
+          fi
+
+          echo "Flashing to: $TARGET"
+          dd if="$IMG" of="$TARGET" bs=4096
+          sync
+          echo "Done. Reboot now."
+          EOF
+          chmod +x flash_boot_root.sh
+
+      - name: Download Manager APKs
         run: |
           set -e
           mkdir -p managers
@@ -385,6 +423,7 @@ jobs:
           path: |
             patched_boot.img
             Flashable_AnyKernel3.zip
+            flash_boot_root.sh
             managers/
             superkey.txt
             report/patch_report.txt
@@ -406,7 +445,6 @@ jobs:
           upload_gofile() {
             local FILE="$1"
             local LABEL="$2"
-
             [ -f "$FILE" ] || { echo "Skip missing: $FILE"; return; }
 
             SERVER=$(curl -sf https://api.gofile.io/servers | jq -r '.data.servers[0].name')
@@ -426,6 +464,7 @@ jobs:
 
           upload_gofile "patched_boot.img" "BOOT"
           upload_gofile "Flashable_AnyKernel3.zip" "ANYKERNEL3"
+          upload_gofile "flash_boot_root.sh" "ROOT_SCRIPT"
 
       - name: Summary
         if: always()
@@ -434,6 +473,7 @@ jobs:
           SUSFS_M="${SUSFS_MODULE:-no}"
           GO_BOOT="${GOFILE_LINK_BOOT:-N/A}"
           GO_AK3="${GOFILE_LINK_ANYKERNEL3:-N/A}"
+          GO_RS="${GOFILE_LINK_ROOT_SCRIPT:-N/A}"
 
           {
             echo "## KSU Boot Patcher Result"
@@ -450,4 +490,5 @@ jobs:
             fi
             echo "| GoFile BOOT | ${GO_BOOT} |"
             echo "| GoFile AnyKernel3 | ${GO_AK3} |"
+            echo "| GoFile Root Script | ${GO_RS} |"
           } >> "$GITHUB_STEP_SUMMARY"
