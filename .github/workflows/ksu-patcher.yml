@@ -294,6 +294,8 @@ jobs:
         mkdir -p kp_work
         cp "workspace/$KFILE" kp_work/stock_kernel
 
+        echo "Kernel size before patch: $(ls -lh kp_work/stock_kernel | awk '{print $5}')"
+
         if file kp_work/stock_kernel | grep -qi 'gzip\|lzma\|lz4'; then
           echo "Decompressing kernel..."
           ./magiskboot decompress kp_work/stock_kernel kp_work/stock_kernel_raw 2>/dev/null || true
@@ -307,10 +309,14 @@ jobs:
           --image kp_work/stock_kernel \
           --skey "$SKEY" \
           --kpimg kpimg \
-          --out kp_work/patched_kernel
+          --out kp_work/patched_kernel || {
+            echo "::error::kptools failed with exit code $?"
+            ls -la kp_work/
+            exit 1
+          }
 
         if [ ! -s kp_work/patched_kernel ]; then
-          echo "::error::KernelPatch failed - patched_kernel not created"
+          echo "::error::patched_kernel file not created"
           ls -la kp_work/
           exit 1
         fi
