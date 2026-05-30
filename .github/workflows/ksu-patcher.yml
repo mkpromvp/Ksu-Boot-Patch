@@ -67,7 +67,7 @@ jobs:
               unzip -j input_file "${{ inputs.zip_boot_path }}" -d ex/ || { echo "::error::zip_boot_path not found"; exit 1; }
             else
               BOOT_PATH=$(unzip -l input_file | awk '{print $4}' \
-                | grep -i 'boot.img$' \
+                | grep -i 'boot\.img$' \
                 | grep -ivE 'vendor_boot|init_boot|recovery|vbmeta|super' \
                 | head -1 || true)
 
@@ -111,7 +111,7 @@ jobs:
           cd workspace
           ../magiskboot unpack boot.img
 
-          KFILE=$(find . -maxdepth 1 ( -name kernel -o -name Image -o -name kernel.gz -o -name kernel_dtb -o -name kernel-dtb ) | head -1)
+          KFILE=$(find . -maxdepth 1 \( -name kernel -o -name Image -o -name kernel.gz -o -name kernel_dtb -o -name kernel-dtb \) | head -1)
           [ -n "$KFILE" ] || { echo "::error::No kernel file found"; exit 1; }
 
           KTARGET="$KFILE"
@@ -120,10 +120,10 @@ jobs:
             [ -s kfile_dec ] && KTARGET="kfile_dec"
           fi
 
-          FULL=$(strings "$KTARGET" 2>/dev/null | grep -oP 'Linux version K[^s]+' | head -1 || true)
+          FULL=$(strings "$KTARGET" 2>/dev/null | grep -oP 'Linux version \K[^\s]+' | head -1 || true)
           if [ -n "$FULL" ]; then
-            KVER=$(echo "$FULL" | grep -oP '^[0-9]+.[0-9]+.[0-9]+' || true)
-            KSHORT=$(echo "$FULL" | grep -oP '^[0-9]+.[0-9]+' || true)
+            KVER=$(echo "$FULL" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+            KSHORT=$(echo "$FULL" | grep -oP '^[0-9]+\.[0-9]+' || true)
             ANDROID=$(echo "$FULL" | grep -oP 'android[0-9]+' | head -1 || true)
             KMI="${KSHORT}-${ANDROID}"
           else
@@ -244,7 +244,7 @@ jobs:
           else
             if file gki_asset | grep -qi zip; then
               unzip -q gki_asset -d src_extract/
-              IMG=$(find src_extract -type f ( -name "Image" -o -name "Image.gz" -o -name "Image*" ) | head -1 || true)
+              IMG=$(find src_extract -type f \( -name "Image" -o -name "Image.gz" -o -name "Image*" \) | head -1 || true)
             else
               cp gki_asset src_extract/Image
               IMG="src_extract/Image"
@@ -282,16 +282,16 @@ jobs:
           perl -0777 -i -pe '
             s/^block=.*/block=boot/m;
             s/^is_slot_device=.*/is_slot_device=auto/m;
-            s/^do.devicecheck=.*/do.devicecheck=0/m;
-            s/^do.modules=.*/do.modules=0/m;
-            s/^kernel.string=.*/kernel.string=KSU Patched Kernel by CI/m;
+            s/^do\.devicecheck=.*/do.devicecheck=0/m;
+            s/^do\.modules=.*/do.modules=0/m;
+            s/^kernel\.string=.*/kernel.string=KSU Patched Kernel by CI/m;
           ' "$AK3/anykernel.sh"
 
           grep -q '^block=' "$AK3/anykernel.sh" || echo 'block=boot' >> "$AK3/anykernel.sh"
           grep -q '^is_slot_device=' "$AK3/anykernel.sh" || echo 'is_slot_device=auto' >> "$AK3/anykernel.sh"
 
           echo "==== anykernel.sh final values ===="
-          grep -E '^(block|is_slot_device|do.devicecheck|do.modules|kernel.string)=' "$AK3/anykernel.sh" || true
+          grep -E '^(block|is_slot_device|do\.devicecheck|do\.modules|kernel\.string)=' "$AK3/anykernel.sh" || true
 
           (cd "$AK3" && zip -r9 ../Flashable_AnyKernel3.zip . -x ".git/*" ".github/*")
           [ -s Flashable_AnyKernel3.zip ] || { echo "::error::AnyKernel zip not created"; exit 1; }
@@ -317,6 +317,8 @@ jobs:
         run: |
           cat > flash_boot_root.sh << 'EOF'
           #!/system/bin/sh
+          # Usage:
+          # su -c sh /sdcard/Download/flash_boot_root.sh /sdcard/Download/patched_boot.img
           set -e
           IMG="$1"
           if [ -z "$IMG" ] || [ ! -f "$IMG" ]; then
@@ -529,16 +531,16 @@ jobs:
             echo ""
             echo "| Property | Value |"
             echo "|---|---|"
-            echo "| Source | `${{ inputs.gki_source }}` |"
-            echo "| Kernel Version | `${{ env.KVER }}` |"
-            echo "| KMI | `${{ env.KMI }}` |"
-            echo "| SUSFS in kernel strings | `${SUSFS_K}` |"
-            echo "| SUSFS module downloaded | `${SUSFS_M}` |"
+            echo "| Source | \`${{ inputs.gki_source }}\` |"
+            echo "| Kernel Version | \`${{ env.KVER }}\` |"
+            echo "| KMI | \`${{ env.KMI }}\` |"
+            echo "| SUSFS in kernel strings | \`${SUSFS_K}\` |"
+            echo "| SUSFS module downloaded | \`${SUSFS_M}\` |"
             if [ -n "${{ env.SUPERKEY }}" ]; then
-              echo "| SuperKey | `${{ env.SUPERKEY }}` |"
+              echo "| SuperKey | \`${{ env.SUPERKEY }}\` |"
             fi
             if [ "${{ inputs.gki_source }}" = "ReSukiSU+SUSFS" ]; then
-              echo "| ReSukiSU Spoofed APK found | `${SPOOFED}` |"
+              echo "| ReSukiSU Spoofed APK found | \`${SPOOFED}\` |"
             fi
             echo "| GoFile BOOT | ${GO_BOOT} |"
             echo "| GoFile AnyKernel3 | ${GO_AK3} |"
