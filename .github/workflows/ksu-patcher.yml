@@ -121,10 +121,16 @@ jobs:
           cd workspace
           ../magiskboot unpack boot.img
 
-          KFILE=$(find . -maxdepth 1 \
-            \( -name kernel -o -name Image -o -name kernel.gz \
-               -o -name kernel_dtb -o -name kernel-dtb \) \
-            | head -1)
+          # Pick real kernel first; kernel_dtb is a fallback only.
+          KFILE=""
+          for CAND in kernel Image kernel.gz Image.gz; do
+            [ -s "$CAND" ] && KFILE="./$CAND" && break
+          done
+          if [ -z "$KFILE" ]; then
+            for CAND in kernel_dtb kernel-dtb; do
+              [ -s "$CAND" ] && KFILE="./$CAND" && break
+            done
+          fi
           [ -n "$KFILE" ] || { echo "::error::No kernel file found after unpack"; exit 1; }
 
           KTARGET="$KFILE"
@@ -256,6 +262,10 @@ jobs:
           [ -s kp_work/kernel_patched ] \
             || { echo "::error::kptools produced empty output"; exit 1; }
 
+          # Guardrail: reject no-op output so user does not flash unpatched boot.
+          cmp -s "$KERNEL_FOR_PATCH" kp_work/kernel_patched \
+            && { echo "::error::Patched kernel is identical to input (no KSU patch applied)"; exit 1; }
+
           if [ -s kp_work/kernel_raw ]; then
             COMP_TYPE=$(file kp_work/kernel_stock \
               | grep -oiE 'gzip|lz4|lzma|xz|bzip2' | head -1 || true)
@@ -337,10 +347,23 @@ jobs:
       - name: Verify SUSFS in kernel
         run: |
           set -e
+          KSU_KERNEL="no"
           SUSFS_KERNEL="no"
+
+          if strings out/Image 2>/dev/null | grep -Eiq 'kernelsu|ksud|/data/adb/ksu|resukisu|sukisu'; then
+            KSU_KERNEL="yes"
+          fi
+
           if strings out/Image 2>/dev/null | grep -Eiq 'susfs|sus_su|ksu_susfs'; then
             SUSFS_KERNEL="yes"
           fi
+
+          # Fail early if image does not contain KernelSU signatures for KSU sources.
+          if [ "${{ inputs.gki_source }}" != "Stock-Boot" ] && [ "${{ inputs.gki_source }}" != "KernelSU-Next" ]; then
+            [ "$KSU_KERNEL" = "yes" ] || { echo "::error::Patched kernel has no KernelSU signature"; exit 1; }
+          fi
+
+          echo "KSU_KERNEL=$KSU_KERNEL" >> "$GITHUB_ENV"
           echo "SUSFS_KERNEL=$SUSFS_KERNEL" >> "$GITHUB_ENV"
 
           {
@@ -348,6 +371,7 @@ jobs:
             echo "Source        : ${{ inputs.gki_source }}"
             echo "Kernel version: $KVER"
             echo "KMI           : $KMI"
+            echo "KSU in image  : $KSU_KERNEL"
             echo "SUSFS in image: $SUSFS_KERNEL"
             echo "SuperKey      : ${SUPERKEY:-N/A}"
           } > report/patch_report.txt
@@ -373,6 +397,23 @@ jobs:
           echo "ERROR: Cannot find boot partition!"
           FLASH_EOF
           chmod +x flash_boot_root.sh
+
+          cat > flash_fastboot_commands.txt << 'FASTBOOT_EOF'
+          Fastboot flashing suggestions (A/B devices):
+
+          1) Check current slot:
+             fastboot getvar current-slot
+
+          2) Safer method (flash both slots):
+             fastboot flash boot_a patched_boot.img
+             fastboot flash boot_b patched_boot.img
+             fastboot reboot
+
+          3) If kernel manager still says Not installed:
+             - Open ReSukiSU manager and press "Click to install"
+             - Reboot once
+             - Verify you flashed the same patched image generated in this run
+          FASTBOOT_EOF
 
       - name: Download Manager APKs
         if: ${{ inputs.gki_source != 'ReSukiSU+SUSFS' }}
@@ -477,6 +518,7 @@ jobs:
             patched_boot.img
             Flashable_AnyKernel3.zip
             flash_boot_root.sh
+            flash_fastboot_commands.txt
             managers/
             superkey.txt
             report/patch_report.txt
@@ -501,6 +543,7 @@ jobs:
           | Source                | ${{ inputs.gki_source }} |
           | Kernel Version        | ${{ env.KVER }} |
           | KMI                   | ${{ env.KMI }} |
+          | KSU in Kernel         | ${{ env.KSU_KERNEL }} |
           | SUSFS in Kernel       | ${{ env.SUSFS_KERNEL }} |
           | SuperKey              | ${{ env.SUPERKEY != '' && 'Set' || 'N/A' }} |
           | Spoofed APK Ready     | ${{ env.RESUKISU_SPOOFED_FOUND }} |
