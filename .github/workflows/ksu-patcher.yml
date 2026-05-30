@@ -167,10 +167,10 @@ jobs:
               ;;
             ReSukiSU+SUSFS)
               echo "SRC_REPO=" >> "$GITHUB_ENV"
-              echo "MGR1_REPO=ReSukiSU/ReSukiSU" >> "$GITHUB_ENV"
-              echo "MGR1_NAME=ReSukiSU_Manager_Normal" >> "$GITHUB_ENV"
-              echo "MGR2_REPO=ReSukiSU/ReSukiSU" >> "$GITHUB_ENV"
-              echo "MGR2_NAME=ReSukiSU_Manager_Spoofed" >> "$GITHUB_ENV"
+              echo "MGR1_REPO=" >> "$GITHUB_ENV"
+              echo "MGR1_NAME=" >> "$GITHUB_ENV"
+              echo "MGR2_REPO=" >> "$GITHUB_ENV"
+              echo "MGR2_NAME=" >> "$GITHUB_ENV"
               ;;
           esac
 
@@ -317,8 +317,6 @@ jobs:
         run: |
           cat > flash_boot_root.sh << 'EOF'
           #!/system/bin/sh
-          # Usage:
-          # su -c sh /sdcard/Download/flash_boot_root.sh /sdcard/Download/patched_boot.img
           set -e
           IMG="$1"
           if [ -z "$IMG" ] || [ ! -f "$IMG" ]; then
@@ -378,54 +376,20 @@ jobs:
           download_apk "$MGR1_REPO" "$MGR1_NAME"
           download_apk "$MGR2_REPO" "$MGR2_NAME"
 
-      - name: Download ReSukiSU Manager APKs (Normal + Spoofed)
+      - name: Build ReSukiSU manager
         if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
         run: |
           set -e
+          rm -rf resukisu_src
           mkdir -p managers
-
-          RELEASE_JSON=$(curl -s "https://api.github.com/repos/ReSukiSU/ReSukiSU/releases/latest")
-
-          NORMAL_URL=$(echo "$RELEASE_JSON" \
-            | jq -r '.assets[]
-                | select(
-                    (.name | endswith(".apk")) and
-                    (.name | test("spoof|Spoof|magisk|Magisk") | not)
-                  )
-                | .browser_download_url' \
-            | head -1 || true)
-
-          if [ -n "$NORMAL_URL" ] && [ "$NORMAL_URL" != "null" ]; then
-            echo "Downloading Normal APK: $NORMAL_URL"
-            curl -sL "$NORMAL_URL" -o "managers/ReSukiSU_Manager_Normal.apk"
-          else
-            echo "::warning::Normal APK not found, falling back to first APK"
-            FALLBACK=$(echo "$RELEASE_JSON" \
-              | jq -r '.assets[] | select(.name|endswith(".apk")) | .browser_download_url' \
-              | head -1 || true)
-            [ -n "$FALLBACK" ] && curl -sL "$FALLBACK" -o "managers/ReSukiSU_Manager_Normal.apk"
-          fi
-
-          SPOOFED_URL=$(echo "$RELEASE_JSON" \
-            | jq -r '.assets[]
-                | select(
-                    (.name | endswith(".apk")) and
-                    (.name | test("spoof|Spoof|magisk|Magisk"))
-                  )
-                | .browser_download_url' \
-            | head -1 || true)
-
-          if [ -n "$SPOOFED_URL" ] && [ "$SPOOFED_URL" != "null" ]; then
-            echo "Downloading Spoofed APK: $SPOOFED_URL"
-            curl -sL "$SPOOFED_URL" -o "managers/ReSukiSU_Manager_Spoofed.apk"
-            echo "RESUKISU_SPOOFED_FOUND=yes" >> "$GITHUB_ENV"
-          else
-            echo "::warning::Spoofed APK not found in latest release assets"
-            echo "RESUKISU_SPOOFED_FOUND=no" >> "$GITHUB_ENV"
-          fi
-
-          echo "=== Available assets in release ==="
-          echo "$RELEASE_JSON" | jq -r '.assets[].name'
+          git clone --depth 1 https://github.com/ReSukiSU/ReSukiSU resukisu_src
+          cd resukisu_src
+          chmod +x ./gradlew
+          ./gradlew assembleRelease
+          APK=$(find . -type f \( -name "*release*.apk" -o -name "app-release.apk" -o -name "*.apk" \) | head -1 || true)
+          [ -n "$APK" ] && [ -s "$APK" ] || { echo "::error::ReSukiSU APK not found"; exit 1; }
+          cp "$APK" ../managers/ReSukiSU_Manager.apk
+          cd ..
 
       - name: Download SUSFS module
         if: ${{ inputs.include_susfs_module }}
@@ -524,7 +488,6 @@ jobs:
           GO_BOOT="${GOFILE_LINK_BOOT:-N/A}"
           GO_AK3="${GOFILE_LINK_ANYKERNEL3:-N/A}"
           GO_RS="${GOFILE_LINK_ROOT_SCRIPT:-N/A}"
-          SPOOFED="${RESUKISU_SPOOFED_FOUND:-N/A}"
 
           {
             echo "## KSU Boot Patcher Result"
@@ -538,9 +501,6 @@ jobs:
             echo "| SUSFS module downloaded | \`${SUSFS_M}\` |"
             if [ -n "${{ env.SUPERKEY }}" ]; then
               echo "| SuperKey | \`${{ env.SUPERKEY }}\` |"
-            fi
-            if [ "${{ inputs.gki_source }}" = "ReSukiSU+SUSFS" ]; then
-              echo "| ReSukiSU Spoofed APK found | \`${SPOOFED}\` |"
             fi
             echo "| GoFile BOOT | ${GO_BOOT} |"
             echo "| GoFile AnyKernel3 | ${GO_AK3} |"
