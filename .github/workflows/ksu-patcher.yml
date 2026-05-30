@@ -1,50 +1,42 @@
-name: KSU Boot Patcher
+name: "KSU Boot Patcher - Multi Manager + SUSFS"
 
 on:
   workflow_dispatch:
     inputs:
       boot_img_url:
-        description: "Direct download URL for stock boot.img"
+        description: "Direct link to boot.img or firmware.zip"
         required: true
         type: string
-
+      zip_boot_path:
+        description: "Path to boot.img inside ZIP (empty = auto)"
+        required: false
+        type: string
       gki_source:
-        description: "GKI kernel source"
+        description: "Kernel source"
         required: true
+        default: "ReSukiSU+SUSFS"
         type: choice
-        default: "zzh20188"
         options:
-          - WildKernels
-          - zzh20188
-          - KernelSU-Next
-
-      manager_target:
-        description: "Target manager compatibility"
-        required: true
-        type: choice
-        default: "ReSukiSU"
-        options:
-          - ReSukiSU
-          - Auto
-
-      susfs_base_url:
-        description: "Optional SUSFS release base URL override"
+          - "WildKernels"
+          - "zzh20188"
+          - "KernelSU-Next"
+          - "Stock-Boot"
+          - "ReSukiSU+SUSFS"
+      superkey:
+        description: "SuperKey for ReSukiSU (empty = auto generate)"
         required: false
         type: string
         default: ""
-
       include_susfs_module:
-        description: "Download ksu_module_susfs"
+        description: "Download SUSFS userspace module"
         required: false
         type: boolean
         default: true
-
       include_zygisk:
-        description: "Download ZygiskNext and Shamiko"
+        description: "Download ZygiskNext + Shamiko"
         required: false
         type: boolean
         default: false
-
       include_lsposed:
         description: "Download LSPosed"
         required: false
@@ -56,295 +48,649 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
+      # ─────────────────────────────────────────────
+      # 1. Download user-supplied boot.img / firmware
+      # ─────────────────────────────────────────────
+      - name: Download input
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq curl wget unzip jq python3 lz4 zstd xz-utils file
+          set -e
+          curl -L --progress-bar "${{ inputs.boot_img_url }}" -o input_file
+          ls -lh input_file
+          file input_file
+          [ "$(stat -c%s input_file)" -ge 1000000 ] || { echo "::error::Input too small (< 1 MB)"; exit 1; }
 
-      - name: Download magiskboot
+      # ─────────────────────────────────────────────
+      # 2. Extract boot.img from zip if needed
+      # ─────────────────────────────────────────────
+      - name: Extract boot.img
         run: |
-          set -euo pipefail
-          wget -q "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-v28.0.apk" -O magisk.apk
-          unzip -q magisk.apk 'lib/x86_64/libmagiskboot.so' -d magisk_tmp
-          cp magisk_tmp/lib/x86_64/libmagiskboot.so ./magiskboot
-          chmod +x ./magiskboot
-          rm -rf magisk.apk magisk_tmp
+          set -e
+          rm -rf ex
+          mkdir -p ex
 
-      - name: Download stock boot.img
-        run: |
-          set -euo pipefail
-          wget -q --show-progress "${{ inputs.boot_img_url }}" -O boot.img
-          test -s boot.img
+          if file input_file | grep -qiE 'zip|archive'; then
+            if [ -n "${{ inputs.zip_boot_path }}" ]; then
+              unzip -j input_file "${{ inputs.zip_boot_path }}" -d ex/ \
+                || { echo "::error::zip_boot_path not found inside archive"; exit 1; }
+            else
+              BOOT_PATH=$(unzip -l input_file | awk '{print $4}' \
+                | grep -iE 'boot\.img$' \
+                | grep -ivE 'vendor_boot|init_boot|recovery|vbmeta|super' \
+                | head -1 || true)
+
+              if [ -z "$BOOT_PATH" ]; then
+                BOOT_PATH=$(unzip -l input_file | awk '{print $4}' \
+                  | grep -iE '^boot' | head -1 || true)
+              fi
+
+              [ -n "$BOOT_PATH" ] \
+                || { echo "::error::Cannot auto-find boot.img inside ZIP. Set zip_boot_path."; exit 1; }
+              unzip -j input_file "$BOOT_PATH" -d ex/
+            fi
+
+            IMG_FOUND=$(find ex -type f -name "*.img" | head -1 || true)
+            [ -n "$IMG_FOUND" ] || { echo "::error::No .img file extracted from archive"; exit 1; }
+            mv "$IMG_FOUND" boot.img
+          else
+            mv input_file boot.img
+          fi
+
+          file boot.img
           ls -lh boot.img
 
-      - name: Unpack boot and detect kernel version
+      # ─────────────────────────────────────────────
+      # 3. Setup magiskboot (x86_64 Linux binary)
+      # ─────────────────────────────────────────────
+      - name: Setup magiskboot
         run: |
-          set -euo pipefail
-          mkdir -p kwork
-          cp boot.img kwork/
-          cd kwork
+          set -e
+          MAGISK_LATEST=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+            | jq -r '.tag_name')
+          MAGISK_APK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^Magisk-v[0-9].*\\.apk$")) | .browser_download_url' \
+            | head -1)
+
+          echo "Downloading Magisk ${MAGISK_LATEST} APK..."
+          curl -fL "$MAGISK_APK_URL" -o magisk.apk
+          [ "$(stat -c%s magisk.apk)" -ge 100000 ] \
+            || { echo "::error::Magisk APK too small, download failed"; exit 1; }
+
+          # Extract the x86_64 magiskboot shared library and use as binary
+          unzip -jq magisk.apk "lib/x86_64/libmagiskboot.so" -d .
+          mv libmagiskboot.so magiskboot
+          chmod +x magiskboot
+          ./magiskboot --version 2>/dev/null || echo "magiskboot ready"
+
+      # ─────────────────────────────────────────────
+      # 4. Unpack boot.img and detect kernel version
+      # ─────────────────────────────────────────────
+      - name: Unpack boot and detect kernel
+        run: |
+          set -e
+          mkdir -p workspace out modules managers report
+          cp boot.img workspace/
+          cd workspace
           ../magiskboot unpack boot.img
 
-          if [ ! -f kernel ]; then
-            echo "ERROR: kernel was not extracted from boot image"
-            exit 1
-          fi
+          # Find the kernel file (various naming conventions)
+          KFILE=$(find . -maxdepth 1 \
+            \( -name kernel -o -name Image -o -name kernel.gz \
+               -o -name kernel_dtb -o -name kernel-dtb \) \
+            | head -1)
+          [ -n "$KFILE" ] || { echo "::error::No kernel file found after unpack"; exit 1; }
 
-          KERNEL_VER=$(strings kernel | grep -m1 "Linux version" | awk '{print $3}' | cut -d'-' -f1)
-          if [ -z "${KERNEL_VER:-}" ]; then
-            echo "ERROR: could not detect Linux version from boot kernel"
-            exit 1
-          fi
+          echo "Kernel file: $KFILE"
 
-          MAJOR=$(echo "$KERNEL_VER" | cut -d'.' -f1)
-          MINOR=$(echo "$KERNEL_VER" | cut -d'.' -f2)
+          # Try to decompress for string scanning
+          KTARGET="$KFILE"
+          ../magiskboot decompress "$KFILE" kfile_dec 2>/dev/null || true
+          [ -s kfile_dec ] && KTARGET="kfile_dec"
 
-          case "$MAJOR.$MINOR" in
-            6.12) KMI="6.12-android16" ;;
-            6.6) KMI="6.6-android15" ;;
-            6.1) KMI="6.1-android14" ;;
-            5.15) KMI="5.15-android13" ;;
-            5.10) KMI="5.10-android12" ;;
-            *)
-              echo "ERROR: unsupported kernel major/minor: $MAJOR.$MINOR"
-              exit 1
-              ;;
-          esac
+          FULL=$(strings "$KTARGET" 2>/dev/null \
+            | grep -oP 'Linux version \K[^\s]+' | head -1 || true)
+          KVER=$(echo "$FULL" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+          KSHORT=$(echo "$FULL" | grep -oP '^[0-9]+\.[0-9]+' || echo "unknown")
+          ANDROID=$(echo "$FULL" | grep -oP 'android[0-9]+' | head -1 || echo "unknown")
+          KMI="${KSHORT}-${ANDROID}"
 
-          {
-            echo "KERNEL_FULL_VER=$KERNEL_VER"
-            echo "KERNEL_MAJOR=$MAJOR"
-            echo "KERNEL_MINOR=$MINOR"
-            echo "KMI=$KMI"
-          } >> "$GITHUB_ENV"
+          echo "Detected: version=$KVER  KMI=$KMI"
 
-          echo "Detected kernel version: $KERNEL_VER"
-          echo "Detected KMI: $KMI"
+          cd ..
+          echo "KFILE=$KFILE"        >> "$GITHUB_ENV"
+          echo "KVER=$KVER"         >> "$GITHUB_ENV"
+          echo "KSHORT=$KSHORT"     >> "$GITHUB_ENV"
+          echo "ANDROID=$ANDROID"   >> "$GITHUB_ENV"
+          echo "KMI=$KMI"           >> "$GITHUB_ENV"
 
-      - name: Resolve SUSFS release
+      # ─────────────────────────────────────────────
+      # 5. Select manager repos / GKI source repo
+      # ─────────────────────────────────────────────
+      - name: Select source config
         run: |
-          set -euo pipefail
-
-          REQUIRE_ZZH=false
-          if [ "${{ inputs.manager_target }}" = "ReSukiSU" ]; then
-            REQUIRE_ZZH=true
-            if [ "${{ inputs.gki_source }}" != "zzh20188" ]; then
-              echo "ERROR: ReSukiSU mode requires gki_source=zzh20188"
-              exit 1
-            fi
-          fi
-
-          if [ -n "${{ inputs.susfs_base_url }}" ]; then
-            BASE="${{ inputs.susfs_base_url }}"
-            REPO=$(echo "$BASE" | sed -E 's#https://github.com/([^/]+/[^/]+)/releases/download/.+#\1#')
-            TAG=$(echo "$BASE" | sed -E 's#.+/releases/download/([^/]+)$#\1#')
-            if [ -z "${REPO:-}" ] || [ -z "${TAG:-}" ]; then
-              echo "ERROR: invalid susfs_base_url format"
-              exit 1
-            fi
-            {
-              echo "SUSFS_BASE=$BASE"
-              echo "SUSFS_REPO=$REPO"
-              echo "SUSFS_TAG=$TAG"
-            } >> "$GITHUB_ENV"
-            exit 0
-          fi
-
+          set -e
           case "${{ inputs.gki_source }}" in
+
             WildKernels)
-              PRIMARY_REPO="WildKernels/GKI_KernelSU_SUSFS"
-              SECONDARY_REPO=""
+              echo "SRC_REPO=WildKernels/GKI_KernelSU_SUSFS"       >> "$GITHUB_ENV"
+              echo "MGR1_REPO=WildKernels/Wild_KSU"                 >> "$GITHUB_ENV"
+              echo "MGR1_NAME=WildKSU_Manager"                      >> "$GITHUB_ENV"
+              echo "MGR2_REPO=KernelSU-Next/KernelSU-Next"         >> "$GITHUB_ENV"
+              echo "MGR2_NAME=KernelSU-Next_Manager"               >> "$GITHUB_ENV"
               ;;
+
             zzh20188)
-              PRIMARY_REPO="zzh20188/GKI_KernelSU_SUSFS"
-              SECONDARY_REPO="WildKernels/GKI_KernelSU_SUSFS"
+              echo "SRC_REPO=zzh20188/GKI_KernelSU_SUSFS"          >> "$GITHUB_ENV"
+              echo "MGR1_REPO=SukiSU-Ultra/SukiSU-Ultra"           >> "$GITHUB_ENV"
+              echo "MGR1_NAME=SukiSU_Manager"                       >> "$GITHUB_ENV"
+              echo "MGR2_REPO=KernelSU-Next/KernelSU-Next"         >> "$GITHUB_ENV"
+              echo "MGR2_NAME=KernelSU-Next_Manager"               >> "$GITHUB_ENV"
               ;;
-            KernelSU-Next)
-              PRIMARY_REPO="WildKernels/GKI_KernelSU_SUSFS"
-              SECONDARY_REPO=""
+
+            KernelSU-Next|Stock-Boot)
+              echo "SRC_REPO="                                       >> "$GITHUB_ENV"
+              echo "MGR1_REPO=KernelSU-Next/KernelSU-Next"         >> "$GITHUB_ENV"
+              echo "MGR1_NAME=KernelSU-Next_Manager"               >> "$GITHUB_ENV"
+              echo "MGR2_REPO="                                      >> "$GITHUB_ENV"
+              echo "MGR2_NAME="                                      >> "$GITHUB_ENV"
               ;;
-            *)
-              echo "ERROR: unknown gki_source: ${{ inputs.gki_source }}"
-              exit 1
+
+            ReSukiSU+SUSFS)
+              echo "SRC_REPO="                                       >> "$GITHUB_ENV"
+              echo "MGR1_REPO=ReSukiSU/ReSukiSU"                   >> "$GITHUB_ENV"
+              echo "MGR1_NAME=ReSukiSU_Manager_Normal"              >> "$GITHUB_ENV"
+              echo "MGR2_REPO=SukiSU-Ultra/SukiSU-Ultra"           >> "$GITHUB_ENV"
+              echo "MGR2_NAME=SukiSU_Manager_Spoofed"              >> "$GITHUB_ENV"
               ;;
           esac
 
-          KMI="${{ env.KMI }}"
-          KVER="${{ env.KERNEL_FULL_VER }}"
-
-          resolve_from_repo() {
-            local repo="$1"
-            local out
-            out=$(curl -sf "https://api.github.com/repos/${repo}/releases?per_page=25" | jq -r --arg kmi "$KMI" --arg kver "$KVER" --arg repo "$repo" '
-              .[] as $rel
-              | ($rel.assets // [])[]?
-              | select(.name | test("(?i)\\.zip$"))
-              | select(
-                  if $kmi == "6.12-android16" then test("(?i)(6\\.12|android16)")
-                  elif $kmi == "6.6-android15" then test("(?i)(6\\.6|android15)")
-                  elif $kmi == "6.1-android14" then test("(?i)(6\\.1|android14)")
-                  elif $kmi == "5.15-android13" then test("(?i)(5\\.15|android13)")
-                  elif $kmi == "5.10-android12" then test("(?i)(5\\.10|android12)")
-                  else false end
-                )
-              | {
-                  tag: $rel.tag_name,
-                  repo: $repo,
-                  name: .name,
-                  url: .browser_download_url,
-                  score: (
-                    (if (.name | test($kver)) then 100 else 0 end)
-                    + (if (.name | test("(?i)android16|android15|android14|android13|android12")) then 5 else 0 end)
-                  )
-                }
-            ' | jq -s 'sort_by(.score) | reverse | .[0] // empty')
-            echo "$out"
-          }
-
-          BEST="$(resolve_from_repo "$PRIMARY_REPO")"
-
-          if [ -z "$BEST" ] || [ "$BEST" = "null" ]; then
-            if [ -n "$SECONDARY_REPO" ]; then
-              if [ "$REQUIRE_ZZH" = "true" ]; then
-                echo "ERROR: ReSukiSU mode requires zzh20188 assets only, but no matching zzh asset was found."
-                echo "Hint: set susfs_base_url manually to a known zzh release tag."
-                exit 1
-              fi
-              echo "Primary source has no matching asset, trying fallback: $SECONDARY_REPO"
-              BEST="$(resolve_from_repo "$SECONDARY_REPO")"
-            fi
-          fi
-
-          if [ -z "$BEST" ] || [ "$BEST" = "null" ]; then
-            echo "ERROR: No SUSFS base found for KMI=$KMI. Set susfs_base_url input."
-            exit 1
-          fi
-
-          REPO=$(echo "$BEST" | jq -r '.repo')
-          TAG=$(echo "$BEST" | jq -r '.tag')
-          BASE="https://github.com/${REPO}/releases/download/${TAG}"
-
-          {
-            echo "SUSFS_REPO=$REPO"
-            echo "SUSFS_TAG=$TAG"
-            echo "SUSFS_BASE=$BASE"
-            echo "SUSFS_ASSET_NAME=$(echo "$BEST" | jq -r '.name')"
-            echo "SUSFS_ASSET_URL=$(echo "$BEST" | jq -r '.url')"
-          } >> "$GITHUB_ENV"
-
-          echo "Resolved release: $REPO @ $TAG"
-          echo "Selected asset: $(echo "$BEST" | jq -r '.name')"
-
-      - name: Download and extract matching kernel image
+      # ─────────────────────────────────────────────
+      # 6a. Download pre-built GKI kernel (non-ReSukiSU)
+      # ─────────────────────────────────────────────
+      - name: Download GKI kernel asset
+        if: ${{ inputs.gki_source != 'ReSukiSU+SUSFS' && inputs.gki_source != 'Stock-Boot' && inputs.gki_source != 'KernelSU-Next' }}
         run: |
-          set -euo pipefail
+          set -e
+          # Find the release asset that matches our KMI string
+          RELEASE_JSON=$(curl -s "https://api.github.com/repos/${SRC_REPO}/releases/latest")
+          ASSET_URL=$(echo "$RELEASE_JSON" \
+            | jq -r --arg kmi "$KMI" \
+              '.assets[] | select(.name | test($kmi; "i")) | .browser_download_url' \
+            | head -1)
+
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            # Fallback: pick first zip/gz asset
+            ASSET_URL=$(echo "$RELEASE_JSON" \
+              | jq -r '.assets[] | select(.name | test("\\.(zip|gz|img)$"; "i")) | .browser_download_url' \
+              | head -1)
+          fi
+
+          [ -n "$ASSET_URL" ] && [ "$ASSET_URL" != "null" ] \
+            || { echo "::error::Cannot find GKI kernel asset for KMI=$KMI in ${SRC_REPO}"; exit 1; }
+
+          echo "Downloading GKI kernel: $ASSET_URL"
+          curl -fL "$ASSET_URL" -o gki_asset
+          ls -lh gki_asset
+
+      # ─────────────────────────────────────────────
+      # 6b. Patch kernel – ReSukiSU + SUSFS (KernelPatch / kptools)
+      # ─────────────────────────────────────────────
+      - name: Patch kernel (ReSukiSU+SUSFS via kptools)
+        if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
+        run: |
+          set -e
+
+          # ── SuperKey ────────────────────────────────────────
+          if [ -n "${{ inputs.superkey }}" ]; then
+            SKEY="${{ inputs.superkey }}"
+          else
+            SKEY="sukisu$(openssl rand -hex 8)"
+          fi
+          echo "$SKEY" > superkey.txt
+          echo "SUPERKEY=$SKEY" >> "$GITHUB_ENV"
+          echo "SuperKey will be: $SKEY"
+
+          # ── Download kptools + kpimg from KernelPatch latest ─
+          KP_JSON=$(curl -s https://api.github.com/repos/bmax121/KernelPatch/releases/latest)
+
+          KPTOOLS_URL=$(echo "$KP_JSON" \
+            | jq -r '.assets[] | select(.name | test("kptools.*linux"; "i")) | .browser_download_url' \
+            | head -1)
+          KPIMG_URL=$(echo "$KP_JSON" \
+            | jq -r '.assets[] | select(.name == "kpimg-android") | .browser_download_url' \
+            | head -1)
+
+          [ -n "$KPTOOLS_URL" ] && [ "$KPTOOLS_URL" != "null" ] \
+            || { echo "::error::kptools-linux not found in KernelPatch releases"; exit 1; }
+          [ -n "$KPIMG_URL" ] && [ "$KPIMG_URL" != "null" ] \
+            || { echo "::error::kpimg-android not found in KernelPatch releases"; exit 1; }
+
+          echo "kptools URL : $KPTOOLS_URL"
+          echo "kpimg  URL  : $KPIMG_URL"
+
+          curl -fL "$KPTOOLS_URL" -o kptools-linux
+          curl -fL "$KPIMG_URL"   -o kpimg-android
+          chmod +x kptools-linux
+
+          # ── Prepare raw (decompressed) kernel for patching ───
+          # magiskboot already unpacked boot.img into workspace/
+          KFILE_CLEAN="${KFILE#./}"           # strip leading ./
           mkdir -p kp_work
 
-          URL="${{ env.SUSFS_ASSET_URL }}"
-          NAME="${{ env.SUSFS_ASSET_NAME }}"
+          cp "workspace/${KFILE_CLEAN}" kp_work/kernel_stock
 
-          if [ -z "${URL:-}" ] || [ -z "${NAME:-}" ]; then
-            echo "ERROR: no asset URL selected"
-            exit 1
-          fi
-
-          wget -q --show-progress "$URL" -O "kp_work/$NAME"
-
-          cd kp_work
-          unzip -q "$NAME" -d unpack
-
-          # Search common kernel filenames in AnyKernel3 packages.
-          KFILE=$(find unpack -type f \( -iname "Image" -o -iname "Image.gz" -o -iname "Image.lz4" -o -iname "kernel" \) | head -n1)
-          if [ -z "${KFILE:-}" ]; then
-            echo "ERROR: no kernel image found in downloaded package"
-            find unpack -maxdepth 3 -type f | sed 's#^# - #' || true
-            exit 1
-          fi
-
-          cp "$KFILE" ../kwork/new_kernel
-          echo "Kernel payload extracted from: $KFILE"
-
-      - name: Replace kernel in boot image and repack
-        run: |
-          set -euo pipefail
-          cd kwork
-
-          file -b new_kernel || true
-
-          if file new_kernel | grep -qi 'LZ4'; then
-            lz4 -d -f new_kernel kernel
-          elif file new_kernel | grep -qi 'gzip compressed'; then
-            gunzip -c new_kernel > kernel
+          # Decompress if the kernel is compressed (gz/lz4/lzma/…)
+          ./magiskboot decompress kp_work/kernel_stock kp_work/kernel_raw 2>/dev/null || true
+          if [ -s kp_work/kernel_raw ]; then
+            echo "Kernel was compressed; using decompressed version for kptools"
+            KERNEL_FOR_PATCH="kp_work/kernel_raw"
           else
-            cp new_kernel kernel
+            KERNEL_FOR_PATCH="kp_work/kernel_stock"
           fi
 
-          ../magiskboot repack boot.img
-          cp new-boot.img ../ksu_patched_boot.img
-          ls -lh ../ksu_patched_boot.img
+          # ── Patch with kptools ───────────────────────────────
+          echo "Patching kernel with kptools..."
+          ./kptools-linux \
+            --patch \
+            --image  "$KERNEL_FOR_PATCH" \
+            --skey   "$SKEY" \
+            --kpimg  kpimg-android \
+            --out    kp_work/kernel_patched
 
-      - name: Download manager APKs
+          [ -s kp_work/kernel_patched ] \
+            || { echo "::error::kptools produced empty/missing output"; exit 1; }
+
+          echo "Patched kernel size: $(ls -lh kp_work/kernel_patched | awk '{print $5}')"
+
+          # ── Re-compress if original was compressed ─────────
+          if [ -s kp_work/kernel_raw ]; then
+            # Detect original compression type from magiskboot output
+            COMP_TYPE=$(./magiskboot cpio workspace/ramdisk.cpio 2>/dev/null | true; \
+              file kp_work/kernel_stock | grep -oiE 'gzip|lz4|lzma|xz|bzip2' | head -1 || true)
+            if [ -n "$COMP_TYPE" ]; then
+              echo "Re-compressing patched kernel as $COMP_TYPE..."
+              ./magiskboot compress="$COMP_TYPE" \
+                kp_work/kernel_patched \
+                kp_work/kernel_patched_compressed 2>/dev/null || \
+              gzip -9 -c kp_work/kernel_patched > kp_work/kernel_patched_compressed
+              [ -s kp_work/kernel_patched_compressed ] \
+                && mv kp_work/kernel_patched_compressed kp_work/kernel_patched
+            fi
+          fi
+
+          # ── Copy patched kernel back into workspace for repack
+          cp kp_work/kernel_patched "workspace/${KFILE_CLEAN}"
+
+          # Also save raw patched Image for AnyKernel3
+          cp kp_work/kernel_patched out/Image
+
+          # ── Repack boot.img ─────────────────────────────────
+          cd workspace
+          ../magiskboot repack boot.img ../patched_boot.img
+          cd ..
+
+          [ -s patched_boot.img ] \
+            || { echo "::error::patched_boot.img is missing or empty after repack"; exit 1; }
+
+          echo "✅ patched_boot.img ready ($(ls -lh patched_boot.img | awk '{print $5}'))"
+
+          # ── Patch report ─────────────────────────────────────
+          {
+            echo "=== ReSukiSU KernelPatch Info ==="
+            echo "SuperKey : $SKEY"
+            echo "kptools  : $(./kptools-linux --version 2>/dev/null || echo 'N/A')"
+          } >> report/patch_report.txt
+
+      # ─────────────────────────────────────────────
+      # 6c. Patch kernel – other sources (swap kernel Image)
+      # ─────────────────────────────────────────────
+      - name: Patch kernel (GKI kernel swap)
+        if: ${{ inputs.gki_source != 'ReSukiSU+SUSFS' }}
         run: |
-          set -euo pipefail
+          set -e
+          mkdir -p src_extract out
+
+          KFILE_CLEAN="${KFILE#./}"
+
+          if [ "${{ inputs.gki_source }}" = "Stock-Boot" ] || [ "${{ inputs.gki_source }}" = "KernelSU-Next" ]; then
+            # Stock-Boot: keep the original kernel unchanged
+            # KernelSU-Next: manager handles LKM injection; no kernel swap needed here
+            cp "workspace/${KFILE_CLEAN}" out/Image
+            echo "Stock kernel copied to out/Image (no swap performed)"
+          else
+            # WildKernels / zzh20188: extract kernel Image from gki_asset
+            if file gki_asset | grep -qi zip; then
+              unzip -q gki_asset -d src_extract/
+              IMG=$(find src_extract -type f \
+                \( -name "Image" -o -name "Image.gz" -o -name "Image.lz4" -o -name "kernel" \) \
+                | head -1 || true)
+            else
+              cp gki_asset src_extract/gki_raw
+              IMG="src_extract/gki_raw"
+            fi
+
+            [ -n "$IMG" ] && [ -s "$IMG" ] \
+              || { echo "::error::No kernel Image found inside GKI asset"; exit 1; }
+
+            # Decompress to raw Image if needed
+            if file "$IMG" | grep -qiE 'gzip|lz4'; then
+              ./magiskboot decompress "$IMG" out/Image 2>/dev/null \
+                || gunzip -c "$IMG" > out/Image
+            else
+              cp "$IMG" out/Image
+            fi
+          fi
+
+          [ -s out/Image ] || { echo "::error::out/Image missing"; exit 1; }
+
+          # Put the Image into workspace and repack
+          cp out/Image "workspace/${KFILE_CLEAN}"
+          cd workspace
+          ../magiskboot repack boot.img ../patched_boot.img
+          cd ..
+
+          [ -s patched_boot.img ] \
+            || { echo "::error::patched_boot.img missing after repack"; exit 1; }
+
+          echo "✅ patched_boot.img ready ($(ls -lh patched_boot.img | awk '{print $5}'))"
+
+      # ─────────────────────────────────────────────
+      # 7. Build AnyKernel3 flashable zip
+      # ─────────────────────────────────────────────
+      - name: Build AnyKernel3
+        run: |
+          set -e
+          [ -s out/Image ] || { echo "::error::out/Image missing – cannot build AnyKernel3"; exit 1; }
+
+          rm -rf AnyKernel3-master ak3.zip Flashable_AnyKernel3.zip
+          curl -fL "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip" -o ak3.zip
+          unzip -q ak3.zip
+          AK3="AnyKernel3-master"
+
+          cp out/Image "$AK3/Image"
+
+          perl -0777 -i -pe '
+            s/^block=.*/block=boot/m;
+            s/^is_slot_device=.*/is_slot_device=auto/m;
+            s/^do\.devicecheck=.*/do.devicecheck=0/m;
+            s/^do\.modules=.*/do.modules=0/m;
+            s/^kernel\.string=.*/kernel.string=KSU Patched by ReSukiSU CI (${{ inputs.gki_source }})/m;
+          ' "$AK3/anykernel.sh"
+
+          (cd "$AK3" && zip -r9 ../Flashable_AnyKernel3.zip . -x ".git/*" ".github/*")
+          [ -s Flashable_AnyKernel3.zip ] \
+            || { echo "::error::Flashable_AnyKernel3.zip was not created"; exit 1; }
+
+          echo "✅ Flashable_AnyKernel3.zip ready"
+
+      # ─────────────────────────────────────────────
+      # 8. Verify SUSFS presence in patched kernel
+      # ─────────────────────────────────────────────
+      - name: Verify SUSFS in kernel
+        run: |
+          set -e
+          SUSFS_KERNEL="no"
+          if strings out/Image 2>/dev/null \
+              | grep -Eiq 'susfs|sus_su|ksu_susfs|SUS_SU'; then
+            SUSFS_KERNEL="yes"
+          fi
+          echo "SUSFS_KERNEL=$SUSFS_KERNEL" >> "$GITHUB_ENV"
+
+          {
+            echo "==============================="
+            echo " KSU Boot Patcher – Report"
+            echo "==============================="
+            echo "Source        : ${{ inputs.gki_source }}"
+            echo "Kernel version: $KVER"
+            echo "KMI           : $KMI"
+            echo "SUSFS in image: $SUSFS_KERNEL"
+            echo "SuperKey      : ${SUPERKEY:-N/A}"
+            echo "==============================="
+          } > report/patch_report.txt
+
+          cat report/patch_report.txt
+
+      # ─────────────────────────────────────────────
+      # 9. Create root-side flash helper script
+      # ─────────────────────────────────────────────
+      - name: Create boot flash helper script
+        run: |
+          cat > flash_boot_root.sh << 'FLASH_EOF'
+          #!/system/bin/sh
+          # flash_boot_root.sh – flash patched_boot.img from a rooted shell
+          IMG="$1"
+          if [ -z "$IMG" ] || [ ! -f "$IMG" ]; then
+            echo "Usage: sh flash_boot_root.sh /path/to/patched_boot.img"
+            exit 1
+          fi
+          SLOT="$(getprop ro.boot.slot_suffix 2>/dev/null || true)"
+          for PART in \
+            /dev/block/by-name/boot${SLOT} \
+            /dev/block/bootdevice/by-name/boot${SLOT} \
+            /dev/block/by-name/boot \
+            /dev/block/bootdevice/by-name/boot; do
+            if [ -e "$PART" ]; then
+              echo "Flashing to: $PART"
+              dd if="$IMG" of="$PART" bs=4096
+              sync
+              echo "Done. Reboot now."
+              exit 0
+            fi
+          done
+          echo "ERROR: Cannot find boot partition!"
+          exit 1
+          FLASH_EOF
+          chmod +x flash_boot_root.sh
+
+      # ─────────────────────────────────────────────
+      # 10. Download Manager APKs (non-ReSukiSU flows)
+      # ─────────────────────────────────────────────
+      - name: Download Manager APKs
+        if: ${{ inputs.gki_source != 'ReSukiSU+SUSFS' }}
+        run: |
+          set -e
           mkdir -p managers
 
-          wget -q "https://github.com/WildKernels/Wild_KSU/releases/latest/download/WildKSU_Manager.apk" -O managers/WildKSU_Manager.apk || true
-          wget -q "https://github.com/KernelSU-Next/KernelSU-Next/releases/latest/download/KernelSU_Next_Manager.apk" -O managers/KernelSU_Next_Manager.apk || true
-          wget -q "https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/latest/download/SukiSU_Ultra_Manager.apk" -O managers/SukiSU_Ultra_Manager.apk || true
+          download_apk() {
+            local REPO="$1"
+            local NAME="$2"
+            [ -z "$REPO" ] && return 0
+            echo "Fetching latest APK from ${REPO}…"
+            URL=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" \
+              | jq -r '[.assets[] | select(.name | endswith(".apk"))]
+                        | sort_by(.created_at) | last | .browser_download_url // empty' \
+              | head -1)
+            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+              curl -fL "$URL" -o "managers/${NAME}.apk"
+              echo "  ✅ Downloaded ${NAME}.apk"
+            else
+              echo "  ⚠️  No APK found for ${REPO}"
+            fi
+          }
 
-          # ReSukiSU manager is distributed via nightly/actions, not stable GitHub releases.
-          cat > managers/ReSukiSU_Manager_Source.txt << 'EOF'
-          ReSukiSU manager download guide:
-          https://resukisu.github.io/guide/install.html
+          download_apk "$MGR1_REPO" "$MGR1_NAME"
+          download_apk "$MGR2_REPO" "$MGR2_NAME"
 
-          If manager_target=ReSukiSU, use the nightly/action build linked in the guide.
-          EOF
+      # ─────────────────────────────────────────────
+      # 11. Download ReSukiSU manager (nightly CI build)
+      #     + SukiSU spoofed APK (nightly CI build)
+      #     Both use nightly.link so no GitHub token needed
+      # ─────────────────────────────────────────────
+      - name: Download ReSukiSU Manager (nightly)
+        if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
+        run: |
+          set -e
+          mkdir -p managers
 
-          - name: Download optional modules
-          run: |
-          set -euo pipefail
+          # ── ReSukiSU Manager ────────────────────────────────
+          # Published via nightly.link (no GH login required)
+          echo "Downloading ReSukiSU Manager from nightly.link…"
+          RSKMGR_URL="https://nightly.link/ReSukiSU/ReSukiSU/workflows/build-manager/main/Manager-release.zip"
+          curl -fL "$RSKMGR_URL" -o rsk_mgr.zip 2>/dev/null \
+            || { echo "::warning::ReSukiSU nightly download failed; trying GitHub API fallback"; true; }
+
+          if [ -s rsk_mgr.zip ]; then
+            unzip -jq rsk_mgr.zip "*.apk" -d managers/ 2>/dev/null || true
+            APK=$(find managers -name "*.apk" | head -1 || true)
+            if [ -n "$APK" ]; then
+              mv "$APK" managers/ReSukiSU_Manager_Normal.apk
+              echo "  ✅ ReSukiSU_Manager_Normal.apk ready"
+            else
+              echo "  ⚠️  No APK found inside nightly zip"
+            fi
+          fi
+
+          # ── SukiSU-Ultra Manager (spoofed build via nightly.link) ─
+          # The spoofed build uses a different versionName to pass integrity checks
+          echo "Downloading SukiSU Spoofed Manager from nightly.link…"
+          SUKI_SPOOF_URL="https://nightly.link/SukiSU-Ultra/SukiSU-Ultra/workflows/build-manager/main/manager.zip"
+          curl -fL "$SUKI_SPOOF_URL" -o suki_spoof.zip 2>/dev/null \
+            || { echo "::warning::SukiSU nightly download failed"; true; }
+
+          if [ -s suki_spoof.zip ]; then
+            unzip -jq suki_spoof.zip "*.apk" -d managers/ 2>/dev/null || true
+            # Pick the spoofed/release APK (prefer file with 'spoof' in name, else latest apk)
+            SPOOF_APK=$(find managers -name "*spoof*.apk" | head -1 || true)
+            [ -z "$SPOOF_APK" ] && SPOOF_APK=$(find managers -name "*.apk" | grep -v ReSukiSU | head -1 || true)
+            if [ -n "$SPOOF_APK" ]; then
+              mv "$SPOOF_APK" managers/SukiSU_Manager_Spoofed.apk
+              echo "  ✅ SukiSU_Manager_Spoofed.apk ready"
+            else
+              echo "  ⚠️  No spoofed APK found inside nightly zip"
+            fi
+          fi
+
+          # ── Fallback: download latest SukiSU APK from Releases ──
+          # (older releases still had APKs attached)
+          if [ ! -f managers/SukiSU_Manager_Spoofed.apk ]; then
+            echo "Trying SukiSU release APK fallback…"
+            SUKI_APK_URL=$(curl -s https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases \
+              | jq -r '[.[].assets[] | select(.name | test("manager.*\\.apk$|SukiSU.*\\.apk$"; "i"))]
+                        | sort_by(.created_at) | last | .browser_download_url // empty' \
+              | head -1)
+            if [ -n "$SUKI_APK_URL" ] && [ "$SUKI_APK_URL" != "null" ]; then
+              curl -fL "$SUKI_APK_URL" -o managers/SukiSU_Manager_Spoofed.apk
+              echo "  ✅ SukiSU APK downloaded from releases"
+            else
+              echo "  ⚠️  No SukiSU APK found in releases either"
+            fi
+          fi
+
+          ls -lh managers/ || true
+          echo "RESUKISU_SPOOFED_FOUND=$([ -f managers/SukiSU_Manager_Spoofed.apk ] && echo 'yes' || echo 'no')" >> "$GITHUB_ENV"
+
+      # ─────────────────────────────────────────────
+      # 12. Optional: SUSFS userspace module
+      # ─────────────────────────────────────────────
+      - name: Download SUSFS userspace module
+        if: ${{ inputs.include_susfs_module }}
+        run: |
+          set -e
+          mkdir -p modules
+          SUSFS_URL=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest \
+            | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' \
+            | head -1)
+
+          # Fallback to known-good version if API fails
+          SUSFS_URL="${SUSFS_URL:-https://github.com/sidex15/ksu_module_susfs/releases/download/v1.5.2/ksu_module_susfs_v1.5.2.zip}"
+
+          curl -fL "$SUSFS_URL" -o modules/ksu_module_susfs.zip
+          echo "✅ SUSFS module: $(ls -lh modules/ksu_module_susfs.zip | awk '{print $5}')"
+          echo "SUSFS_MODULE=yes" >> "$GITHUB_ENV"
+
+      # ─────────────────────────────────────────────
+      # 13. Optional: ZygiskNext + Shamiko
+      # ─────────────────────────────────────────────
+      - name: Download ZygiskNext + Shamiko
+        if: ${{ inputs.include_zygisk }}
+        run: |
+          set -e
           mkdir -p modules
 
-          if [ "${{ inputs.include_susfs_module }}" = "true" ]; then
-            curl -fsSL "https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest" \
-              | jq -r '.assets[] | select(.name|test("(?i)zip$")) | .browser_download_url' \
-              | head -n1 \
-              | xargs -r wget -q -O modules/ksu_module_susfs.zip
-          fi
+          # ZygiskNext
+          ZN_URL=$(curl -s https://api.github.com/repos/Dr-TSNG/ZygiskNext/releases/latest \
+            | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' \
+            | head -1)
+          [ -n "$ZN_URL" ] && curl -fL "$ZN_URL" -o modules/ZygiskNext.zip \
+            || curl -fL "https://github.com/Dr-TSNG/ZygiskNext/releases/latest/download/ZygiskNext.zip" \
+                -o modules/ZygiskNext.zip
 
-          if [ "${{ inputs.include_zygisk }}" = "true" ]; then
-            curl -fsSL "https://api.github.com/repos/Dr-TSNG/ZygiskNext/releases/latest" \
-              | jq -r '.assets[] | select(.name|test("(?i)zip$")) | .browser_download_url' \
-              | head -n1 \
-              | xargs -r wget -q -O modules/ZygiskNext.zip
+          # Shamiko
+          SH_URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed.github.io/releases/latest \
+            | jq -r '.assets[] | select(.name | test("[Ss]hamiko")) | .browser_download_url' \
+            | head -1)
+          [ -n "$SH_URL" ] && curl -fL "$SH_URL" -o modules/Shamiko.zip \
+            || echo "::warning::Shamiko download failed"
 
-            curl -fsSL "https://api.github.com/repos/LSPosed/LSPosed.github.io/releases/latest" \
-              | jq -r '.assets[] | select(.name|test("(?i)shamiko.*zip$")) | .browser_download_url' \
-              | head -n1 \
-              | xargs -r wget -q -O modules/Shamiko.zip
-          fi
+          ls -lh modules/
 
-          if [ "${{ inputs.include_lsposed }}" = "true" ]; then
-            curl -fsSL "https://api.github.com/repos/LSPosed/LSPosed/releases/latest" \
-              | jq -r '.assets[] | select(.name|test("(?i)zygisk.*zip$")) | .browser_download_url' \
-              | head -n1 \
-              | xargs -r wget -q -O modules/LSPosed.zip
-          fi
+      # ─────────────────────────────────────────────
+      # 14. Optional: LSPosed
+      # ─────────────────────────────────────────────
+      - name: Download LSPosed
+        if: ${{ inputs.include_lsposed }}
+        run: |
+          set -e
+          mkdir -p modules
+          LSP_URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest \
+            | jq -r '.assets[] | select(.name | test("\\.zip$")) | .browser_download_url' \
+            | head -1)
+          [ -n "$LSP_URL" ] \
+            && curl -fL "$LSP_URL" -o modules/LSPosed.zip \
+            || echo "::warning::LSPosed download failed"
 
-      - name: Upload patched boot and managers
+      # ─────────────────────────────────────────────
+      # 15. Upload main artifacts
+      # ─────────────────────────────────────────────
+      - name: Upload main artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KSU-Boot
+          name: "KSU [${{ inputs.gki_source }}] [${{ env.KMI }}]"
           path: |
-            ksu_patched_boot.img
-            managers/*
+            patched_boot.img
+            Flashable_AnyKernel3.zip
+            flash_boot_root.sh
+            managers/
+            superkey.txt
+            report/patch_report.txt
+          if-no-files-found: warn
+          retention-days: 7
 
-      - name: Upload optional modules
+      # ─────────────────────────────────────────────
+      # 16. Upload modules artifact (optional)
+      # ─────────────────────────────────────────────
+      - name: Upload modules artifact
+        if: ${{ inputs.include_susfs_module || inputs.include_zygisk || inputs.include_lsposed }}
         uses: actions/upload-artifact@v4
         with:
-          name: KSU-Modules
-          path: modules/*
-          if-no-files-found: ignore
+          name: "KSU-Modules [${{ inputs.gki_source }}]"
+          path: modules/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ─────────────────────────────────────────────
+      # 17. Job Summary
+      # ─────────────────────────────────────────────
+      - name: Summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## KSU Boot Patcher Result
+
+          | Property              | Value |
+          |-----------------------|-------|
+          | Source                | ${{ inputs.gki_source }} |
+          | Kernel Version        | ${{ env.KVER }} |
+          | KMI                   | ${{ env.KMI }} |
+          | SUSFS in Kernel       | ${{ env.SUSFS_KERNEL }} |
+          | SuperKey              | ${{ env.SUPERKEY != '' && '✅ Set' || 'N/A' }} |
+          | Spoofed APK Ready     | ${{ env.RESUKISU_SPOOFED_FOUND }} |
+          | SUSFS Module          | ${{ env.SUSFS_MODULE != '' && 'yes' || 'no' }} |
+
+          ### Files in artifact
+          - \`patched_boot.img\` – Flash with fastboot or dd
+          - \`Flashable_AnyKernel3.zip\` – Flash from TWRP / recovery
+          - \`flash_boot_root.sh\` – Flash from rooted shell
+          - \`managers/\` – KSU manager APKs
+          - \`superkey.txt\` – Your ReSukiSU SuperKey (keep safe!)
+          - \`report/patch_report.txt\` – Build details
+          EOF
