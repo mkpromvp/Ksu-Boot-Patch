@@ -14,14 +14,26 @@ on:
       gki_source:
         description: "Kernel source"
         required: true
-        default: "ReSukiSU+SUSFS"
+        default: "Auto-GKI-SUSFS"
         type: choice
         options:
+          - "Auto-GKI-SUSFS"
           - "WildKernels"
           - "zzh20188"
           - "KernelSU-Next"
           - "Stock-Boot"
+          - "Manual-Prebuilt"
           - "ReSukiSU+SUSFS"
+      manual_kernel_url:
+        description: "Manual prebuilt kernel URL (.img/.gz/.zip) used when gki_source=Manual-Prebuilt"
+        required: false
+        type: string
+        default: ""
+      manual_kernel_inner_path:
+        description: "Optional path to Image/kernel inside manual ZIP"
+        required: false
+        type: string
+        default: ""
       superkey:
         description: "SuperKey for ReSukiSU (empty = auto generate)"
         required: false
@@ -144,17 +156,38 @@ jobs:
           ANDROID=$(echo "$FULL" | grep -oP 'android[0-9]+' | head -1 || echo "unknown")
           KMI="${KSHORT}-${ANDROID}"
 
+          IS_GKI="no"
+          if [ "$KSHORT" != "unknown" ] && echo "$ANDROID" | grep -qE '^android[0-9]+$'; then
+            IS_GKI="yes"
+          fi
+
           cd ..
           echo "KFILE=$KFILE"      >> "$GITHUB_ENV"
           echo "KVER=$KVER"        >> "$GITHUB_ENV"
           echo "KSHORT=$KSHORT"    >> "$GITHUB_ENV"
           echo "ANDROID=$ANDROID"  >> "$GITHUB_ENV"
           echo "KMI=$KMI"          >> "$GITHUB_ENV"
+          echo "IS_GKI=$IS_GKI"    >> "$GITHUB_ENV"
+
+      - name: Validate GKI boot image
+        run: |
+          set -e
+          [ "$IS_GKI" = "yes" ] || {
+            echo "::error::Input boot is not recognized as GKI (KMI=$KMI). This workflow targets GKI only.";
+            exit 1;
+          }
 
       - name: Select source config
         run: |
           set -e
           case "${{ inputs.gki_source }}" in
+            Auto-GKI-SUSFS)
+              echo "SRC_REPO="                                     >> "$GITHUB_ENV"
+              echo "MGR1_REPO=ReSukiSU/ReSukiSU"                   >> "$GITHUB_ENV"
+              echo "MGR1_NAME=ReSukiSU_Manager_Normal"             >> "$GITHUB_ENV"
+              echo "MGR2_REPO=SukiSU-Ultra/SukiSU-Ultra"           >> "$GITHUB_ENV"
+              echo "MGR2_NAME=SukiSU_Manager_Spoofed"              >> "$GITHUB_ENV"
+              ;;
             WildKernels)
               echo "SRC_REPO=WildKernels/GKI_KernelSU_SUSFS"      >> "$GITHUB_ENV"
               echo "MGR1_REPO=WildKernels/Wild_KSU"                >> "$GITHUB_ENV"
@@ -176,6 +209,13 @@ jobs:
               echo "MGR2_REPO="                                    >> "$GITHUB_ENV"
               echo "MGR2_NAME="                                    >> "$GITHUB_ENV"
               ;;
+            Manual-Prebuilt)
+              echo "SRC_REPO="                                     >> "$GITHUB_ENV"
+              echo "MGR1_REPO=ReSukiSU/ReSukiSU"                   >> "$GITHUB_ENV"
+              echo "MGR1_NAME=ReSukiSU_Manager_Normal"             >> "$GITHUB_ENV"
+              echo "MGR2_REPO=SukiSU-Ultra/SukiSU-Ultra"           >> "$GITHUB_ENV"
+              echo "MGR2_NAME=SukiSU_Manager_Spoofed"              >> "$GITHUB_ENV"
+              ;;
             ReSukiSU+SUSFS)
               echo "SRC_REPO="                                     >> "$GITHUB_ENV"
               echo "MGR1_REPO=ReSukiSU/ReSukiSU"                   >> "$GITHUB_ENV"
@@ -186,7 +226,7 @@ jobs:
           esac
 
       - name: Download GKI kernel asset
-        if: ${{ inputs.gki_source != 'ReSukiSU+SUSFS' && inputs.gki_source != 'Stock-Boot' && inputs.gki_source != 'KernelSU-Next' }}
+        if: ${{ inputs.gki_source != 'Auto-GKI-SUSFS' && inputs.gki_source != 'ReSukiSU+SUSFS' && inputs.gki_source != 'Stock-Boot' && inputs.gki_source != 'KernelSU-Next' && inputs.gki_source != 'Manual-Prebuilt' }}
         run: |
           set -e
           KMI_L=$(echo "$KMI" | tr '[:upper:]' '[:lower:]')
@@ -209,6 +249,55 @@ jobs:
           [ -n "$ASSET_URL" ] && [ "$ASSET_URL" != "null" ] \
             || { echo "::error::Cannot find GKI kernel asset for KMI=$KMI"; exit 1; }
           curl -fL "$ASSET_URL" -o gki_asset
+
+      - name: Download GKI kernel asset (auto SUSFS repos)
+        if: ${{ inputs.gki_source == 'Auto-GKI-SUSFS' }}
+        run: |
+          set -e
+          KMI_L=$(echo "$KMI" | tr '[:upper:]' '[:lower:]')
+          REPOS="WildKernels/GKI_KernelSU_SUSFS zzh20188/GKI_KernelSU_SUSFS"
+          FOUND_URL=""
+
+          for REPO in $REPOS; do
+            echo "Trying repo: $REPO for KMI=$KMI_L"
+            RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" || true)
+            [ -n "$RELEASE_JSON" ] || continue
+
+            FOUND_URL=$(echo "$RELEASE_JSON" \
+              | jq -r --arg kmi "$KMI_L" '[.assets[]
+                | select(.name | ascii_downcase | contains($kmi))
+                | select(.name | ascii_downcase | test("susfs|sukisu|ksu"))]
+                | sort_by(.created_at) | last | .browser_download_url // empty' \
+              | head -1)
+
+            if [ -z "$FOUND_URL" ] || [ "$FOUND_URL" = "null" ]; then
+              FOUND_URL=$(echo "$RELEASE_JSON" \
+                | jq -r --arg kmi "$KMI_L" '[.assets[]
+                  | select(.name | ascii_downcase | contains($kmi))
+                  | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
+                  | sort_by(.created_at) | last | .browser_download_url // empty' \
+                | head -1)
+            fi
+
+            if [ -n "$FOUND_URL" ] && [ "$FOUND_URL" != "null" ]; then
+              echo "AUTO_SRC_REPO=$REPO" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+
+          [ -n "$FOUND_URL" ] && [ "$FOUND_URL" != "null" ] \
+            || { echo "::error::No auto SUSFS GKI asset found for KMI=$KMI in supported repos"; exit 1; }
+          curl -fL "$FOUND_URL" -o gki_asset
+
+      - name: Download manual prebuilt kernel asset
+        if: ${{ inputs.gki_source == 'Manual-Prebuilt' }}
+        run: |
+          set -e
+          [ -n "${{ inputs.manual_kernel_url }}" ] \
+            || { echo "::error::manual_kernel_url is required for Manual-Prebuilt"; exit 1; }
+          curl -fL --progress-bar "${{ inputs.manual_kernel_url }}" -o manual_asset
+          [ "$(stat -c%s manual_asset)" -ge 2000000 ] \
+            || { echo "::error::manual prebuilt asset too small (< 2 MB)"; exit 1; }
 
       - name: Patch kernel (ReSukiSU+SUSFS via kptools)
         if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
@@ -243,14 +332,54 @@ jobs:
 
           KFILE_CLEAN="${KFILE#./}"
           mkdir -p kp_work
-          cp "workspace/${KFILE_CLEAN}" kp_work/kernel_stock
 
-          ./magiskboot decompress kp_work/kernel_stock kp_work/kernel_raw 2>/dev/null || true
-          if [ -s kp_work/kernel_raw ]; then
-            KERNEL_FOR_PATCH="kp_work/kernel_raw"
+          # ReSukiSU+SUSFS mode: always patch on top of a SUSFS-enabled GKI base.
+          KMI_L=$(echo "$KMI" | tr '[:upper:]' '[:lower:]')
+          REPOS="WildKernels/GKI_KernelSU_SUSFS zzh20188/GKI_KernelSU_SUSFS"
+          SUSFS_URL=""
+
+          for REPO in $REPOS; do
+            RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" || true)
+            [ -n "$RELEASE_JSON" ] || continue
+
+            SUSFS_URL=$(echo "$RELEASE_JSON" \
+              | jq -r --arg kmi "$KMI_L" '[.assets[]
+                | select(.name | ascii_downcase | contains($kmi))
+                | select(.name | ascii_downcase | contains("susfs"))
+                | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
+                | sort_by(.created_at) | last | .browser_download_url // empty' \
+              | head -1)
+
+            if [ -n "$SUSFS_URL" ] && [ "$SUSFS_URL" != "null" ]; then
+              echo "SUSFS_BASE_REPO=$REPO" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+
+          [ -n "$SUSFS_URL" ] && [ "$SUSFS_URL" != "null" ] \
+            || { echo "::error::No SUSFS GKI base found for KMI=$KMI"; exit 1; }
+
+          curl -fL "$SUSFS_URL" -o kp_work/susfs_asset
+
+          if file kp_work/susfs_asset | grep -qi zip; then
+            unzip -q kp_work/susfs_asset -d kp_work/extract/
+            BASE_IMG=$(find kp_work/extract -type f \
+              \( -name "Image" -o -name "Image.gz" -o -name "kernel" -o -name "kernel.gz" -o -name "*.img" \) \
+              | head -1 || true)
           else
-            KERNEL_FOR_PATCH="kp_work/kernel_stock"
+            BASE_IMG="kp_work/susfs_asset"
           fi
+
+          [ -n "$BASE_IMG" ] && [ -s "$BASE_IMG" ] \
+            || { echo "::error::Cannot extract kernel from SUSFS base asset"; exit 1; }
+
+          ./magiskboot decompress "$BASE_IMG" kp_work/kernel_stock_raw 2>/dev/null || cp "$BASE_IMG" kp_work/kernel_stock_raw
+          [ -s kp_work/kernel_stock_raw ] || { echo "::error::SUSFS base kernel extraction failed"; exit 1; }
+
+          strings kp_work/kernel_stock_raw 2>/dev/null | grep -Eiq 'susfs|sus_su|ksu_susfs' \
+            || { echo "::error::Selected SUSFS base does not contain SUSFS signatures"; exit 1; }
+
+          KERNEL_FOR_PATCH="kp_work/kernel_stock_raw"
 
           ./kptools-linux \
             --patch \
@@ -266,21 +395,18 @@ jobs:
           cmp -s "$KERNEL_FOR_PATCH" kp_work/kernel_patched \
             && { echo "::error::Patched kernel is identical to input (no KSU patch applied)"; exit 1; }
 
-          if [ -s kp_work/kernel_raw ]; then
-            COMP_TYPE=$(file kp_work/kernel_stock \
-              | grep -oiE 'gzip|lz4|lzma|xz|bzip2' | head -1 || true)
-            if [ -n "$COMP_TYPE" ]; then
-              ./magiskboot compress="$COMP_TYPE" \
-                kp_work/kernel_patched \
-                kp_work/kernel_patched_compressed 2>/dev/null \
-                || gzip -9 -c kp_work/kernel_patched > kp_work/kernel_patched_compressed
-              [ -s kp_work/kernel_patched_compressed ] \
-                && mv kp_work/kernel_patched_compressed kp_work/kernel_patched
-            fi
+          cp kp_work/kernel_patched out/Image
+
+          ORIG_COMP_TYPE=$(file "workspace/${KFILE_CLEAN}" | grep -oiE 'gzip|lz4|lzma|xz|bzip2' | head -1 || true)
+          if [ -n "$ORIG_COMP_TYPE" ]; then
+            ./magiskboot compress="$ORIG_COMP_TYPE" out/Image kp_work/kernel_patched_for_boot 2>/dev/null \
+              || gzip -9 -c out/Image > kp_work/kernel_patched_for_boot
+          else
+            cp out/Image kp_work/kernel_patched_for_boot
           fi
 
-          cp kp_work/kernel_patched "workspace/${KFILE_CLEAN}"
-          cp kp_work/kernel_patched out/Image
+          [ -s kp_work/kernel_patched_for_boot ] || { echo "::error::Final patched kernel packaging failed"; exit 1; }
+          cp kp_work/kernel_patched_for_boot "workspace/${KFILE_CLEAN}"
 
           cd workspace
           ../magiskboot repack boot.img ../patched_boot.img
@@ -299,12 +425,22 @@ jobs:
           if [ "${{ inputs.gki_source }}" = "Stock-Boot" ] || [ "${{ inputs.gki_source }}" = "KernelSU-Next" ]; then
             cp "workspace/${KFILE_CLEAN}" out/Image
           else
-            if file gki_asset | grep -qi zip; then
-              unzip -q gki_asset -d src_extract/
-              IMG=$(find src_extract -type f \
-                \( -name "Image" -o -name "Image.gz" -o -name "kernel" \) | head -1 || true)
+            SRC_ASSET="gki_asset"
+            [ "${{ inputs.gki_source }}" = "Manual-Prebuilt" ] && SRC_ASSET="manual_asset"
+
+            if file "$SRC_ASSET" | grep -qi zip; then
+              if [ -n "${{ inputs.manual_kernel_inner_path }}" ] && [ "${{ inputs.gki_source }}" = "Manual-Prebuilt" ]; then
+                unzip -j "$SRC_ASSET" "${{ inputs.manual_kernel_inner_path }}" -d src_extract/ \
+                  || { echo "::error::manual_kernel_inner_path not found in manual ZIP"; exit 1; }
+                IMG=$(find src_extract -type f | head -1 || true)
+              else
+                unzip -q "$SRC_ASSET" -d src_extract/
+                IMG=$(find src_extract -type f \
+                  \( -name "Image" -o -name "Image.gz" -o -name "kernel" -o -name "kernel.gz" -o -name "*.img" \) \
+                  | head -1 || true)
+              fi
             else
-              cp gki_asset src_extract/gki_raw
+              cp "$SRC_ASSET" src_extract/gki_raw
               IMG="src_extract/gki_raw"
             fi
 
@@ -363,6 +499,11 @@ jobs:
             [ "$KSU_KERNEL" = "yes" ] || { echo "::error::Patched kernel has no KernelSU signature"; exit 1; }
           fi
 
+          # SUSFS is required for every non-stock source.
+          if [ "${{ inputs.gki_source }}" != "Stock-Boot" ]; then
+            [ "$SUSFS_KERNEL" = "yes" ] || { echo "::error::Patched kernel has no SUSFS signature"; exit 1; }
+          fi
+
           echo "KSU_KERNEL=$KSU_KERNEL" >> "$GITHUB_ENV"
           echo "SUSFS_KERNEL=$SUSFS_KERNEL" >> "$GITHUB_ENV"
 
@@ -416,7 +557,7 @@ jobs:
           FASTBOOT_EOF
 
       - name: Download Manager APKs
-        if: ${{ inputs.gki_source != 'ReSukiSU+SUSFS' }}
+        if: ${{ inputs.gki_source != 'ReSukiSU+SUSFS' && inputs.gki_source != 'Manual-Prebuilt' && inputs.gki_source != 'Auto-GKI-SUSFS' }}
         run: |
           set -e
           mkdir -p managers
@@ -433,7 +574,7 @@ jobs:
           download_apk "$MGR2_REPO" "$MGR2_NAME"
 
       - name: Download ReSukiSU Manager (nightly)
-        if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
+        if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' || inputs.gki_source == 'Manual-Prebuilt' || inputs.gki_source == 'Auto-GKI-SUSFS' }}
         run: |
           set -e
           mkdir -p managers
@@ -543,6 +684,7 @@ jobs:
           | Source                | ${{ inputs.gki_source }} |
           | Kernel Version        | ${{ env.KVER }} |
           | KMI                   | ${{ env.KMI }} |
+          | GKI Detected          | ${{ env.IS_GKI }} |
           | KSU in Kernel         | ${{ env.KSU_KERNEL }} |
           | SUSFS in Kernel       | ${{ env.SUSFS_KERNEL }} |
           | SuperKey              | ${{ env.SUPERKEY != '' && 'Set' || 'N/A' }} |
