@@ -272,6 +272,7 @@ jobs:
               | jq -r --arg kmi "$KMI_L" '[.assets[]
                 | select(.name | ascii_downcase | contains($kmi))
                 | select(.name | ascii_downcase | test("susfs|sukisu|ksu"))]
+                | map(select(.name | ascii_downcase | test("module|userspace|manager|apk") | not))
                 | sort_by(.created_at) | last | .browser_download_url // empty' \
               | head -1)
 
@@ -358,6 +359,45 @@ jobs:
             cp "$PATCHED_IMG" "$OUTPUT_IMG"
           }
 
+          extract_kernel_raw() {
+            local SRC_ASSET="$1"
+            local OUT_RAW="$2"
+            local WORK_DIR="$3"
+            local PICKED=""
+
+            rm -rf "$WORK_DIR"
+            mkdir -p "$WORK_DIR"
+
+            if file "$SRC_ASSET" | grep -qi zip; then
+              unzip -q "$SRC_ASSET" -d "$WORK_DIR/extracted" || true
+              PICKED=$(find "$WORK_DIR/extracted" -type f \
+                \( -iname "Image" -o -iname "Image.gz" -o -iname "Image.lz4" \
+                   -o -iname "kernel" -o -iname "kernel.gz" -o -iname "kernel.lz4" \
+                   -o -iname "*boot*.img" -o -iname "*.img" \) \
+                | head -1 || true)
+            else
+              PICKED="$SRC_ASSET"
+            fi
+
+            [ -n "$PICKED" ] && [ -s "$PICKED" ] || return 1
+
+            if basename "$PICKED" | grep -qi 'boot\.img'; then
+              cp "$PICKED" "$WORK_DIR/boot.img"
+              (
+                cd "$WORK_DIR"
+                ../../magiskboot unpack boot.img >/dev/null 2>&1 || true
+              )
+              BOOT_KERNEL=$(find "$WORK_DIR" -maxdepth 1 -type f \
+                \( -name kernel -o -name Image -o -name kernel.gz -o -name Image.gz -o -name kernel_dtb -o -name kernel-dtb \) \
+                | head -1 || true)
+              [ -n "$BOOT_KERNEL" ] && PICKED="$BOOT_KERNEL"
+            fi
+
+            ./magiskboot decompress "$PICKED" "$OUT_RAW" 2>/dev/null || cp "$PICKED" "$OUT_RAW"
+            [ -s "$OUT_RAW" ] || return 1
+            return 0
+          }
+
           # Stage 1: apply ReSukiSU on stock kernel first.
           cp "workspace/${KFILE_CLEAN}" kp_work/kernel_stock_original
           patch_resukisu \
@@ -391,6 +431,7 @@ jobs:
                   | jq -r --arg kmi "$KMI_L" '[.assets[]
                     | select(.name | ascii_downcase | contains("susfs"))
                     | select(.name | ascii_downcase | contains($kmi))
+                    | select(.name | ascii_downcase | test("module|userspace|manager|apk") | not)
                     | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
                     | sort_by(.created_at) | last | .browser_download_url // empty' \
                   | head -1)
@@ -402,6 +443,7 @@ jobs:
                       | select(.name | ascii_downcase | contains("susfs"))
                       | select(.name | ascii_downcase | contains($kshort))
                       | select(.name | ascii_downcase | contains($android))
+                      | select(.name | ascii_downcase | test("module|userspace|manager|apk") | not)
                       | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
                       | sort_by(.created_at) | last | .browser_download_url // empty' \
                     | head -1)
@@ -413,6 +455,7 @@ jobs:
                     | jq -r --arg kshort "$KSHORT_L" '[.assets[]
                       | select(.name | ascii_downcase | contains("susfs"))
                       | select(.name | ascii_downcase | contains($kshort))
+                      | select(.name | ascii_downcase | test("module|userspace|manager|apk") | not)
                       | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
                       | sort_by(.created_at) | last | .browser_download_url // empty' \
                     | head -1)
@@ -423,6 +466,7 @@ jobs:
                   SUSFS_URL=$(echo "$RELEASE_JSON" \
                     | jq -r '[.assets[]
                       | select(.name | ascii_downcase | contains("susfs"))
+                      | select(.name | ascii_downcase | test("module|userspace|manager|apk") | not)
                       | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
                       | sort_by(.created_at) | last | .browser_download_url // empty' \
                     | head -1)
@@ -439,20 +483,15 @@ jobs:
               || { echo "::error::No SUSFS base found for KMI=$KMI. Set susfs_base_url input."; exit 1; }
 
             curl -fL "$SUSFS_URL" -o kp_work/susfs_asset
-            if file kp_work/susfs_asset | grep -qi zip; then
-              unzip -q kp_work/susfs_asset -d kp_work/extract/
-              BASE_IMG=$(find kp_work/extract -type f \
-                \( -name "Image" -o -name "Image.gz" -o -name "kernel" -o -name "kernel.gz" -o -name "*.img" \) \
-                | head -1 || true)
-            else
-              BASE_IMG="kp_work/susfs_asset"
-            fi
-
-            [ -n "$BASE_IMG" ] && [ -s "$BASE_IMG" ] \
-              || { echo "::error::Cannot extract kernel from SUSFS asset"; exit 1; }
-
-            ./magiskboot decompress "$BASE_IMG" kp_work/kernel_susfs_raw 2>/dev/null || cp "$BASE_IMG" kp_work/kernel_susfs_raw
-            [ -s kp_work/kernel_susfs_raw ] || { echo "::error::Failed to decode SUSFS base kernel"; exit 1; }
+            extract_kernel_raw kp_work/susfs_asset kp_work/kernel_susfs_raw kp_work/susfs_unpack \
+              || {
+                echo "::error::Cannot extract kernel from SUSFS asset (URL=$SUSFS_URL)";
+                echo "::group::SUSFS asset debug"
+                file kp_work/susfs_asset || true
+                unzip -l kp_work/susfs_asset 2>/dev/null | head -120 || true
+                echo "::endgroup::"
+                exit 1
+              }
 
             strings kp_work/kernel_susfs_raw 2>/dev/null | grep -Eiq 'susfs|sus_su|ksu_susfs' \
               || { echo "::error::Selected SUSFS base has no SUSFS signature"; exit 1; }
