@@ -1,6 +1,3 @@
-أهلاً بك! قمت باستبدال خطوة تحميل التطبيق الجاهز (Download ReSukiSU Manager APKs) بخطوة البناء من المصدر (Build ReSukiSU manager) التي طلبتها. كما قمت بضبط المسافات البادئة (Indentation) بدقة لضمان عمل الملف بدون أي أخطاء (Syntax Errors) في GitHub Actions.
-إليك الملف كاملاً ومعدلاً:
-```yaml
 name: "KSU Boot Patcher - Multi Manager + SUSFS"
 
 on:
@@ -126,7 +123,7 @@ jobs:
           KVER=$(echo "$FULL" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
           KSHORT=$(echo "$FULL" | grep -oP '^[0-9]+\.[0-9]+' || echo "unknown")
           ANDROID=$(echo "$FULL" | grep -oP 'android[0-9]+' | head -1 || echo "unknown")
-          KMI="\( {KSHORT}- \){ANDROID}"
+          KMI="${KSHORT}-${ANDROID}"
 
           cd ..
           echo "KFILE=$KFILE" >> "$GITHUB_ENV"
@@ -173,7 +170,7 @@ jobs:
         if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
         run: |
           set -e
-          if [ -n "\( {{ inputs.superkey }}" ] && [ " \){{ inputs.superkey }}" != "" ]; then
+          if [ -n "${{ inputs.superkey }}" ] && [ "${{ inputs.superkey }}" != "" ]; then
             SKEY="${{ inputs.superkey }}"
           else
             SKEY="sukisu$(openssl rand -hex 8)"
@@ -225,7 +222,7 @@ jobs:
           set -e
           mkdir -p src_extract
 
-          if [ "\( {{ inputs.gki_source }}" = "Stock-Boot" ] || [ " \){{ inputs.gki_source }}" = "KernelSU-Next" ]; then
+          if [ "${{ inputs.gki_source }}" = "Stock-Boot" ] || [ "${{ inputs.gki_source }}" = "KernelSU-Next" ]; then
             cp "workspace/$KFILE" out/Image
           else
             if file gki_asset | grep -qi zip; then
@@ -302,7 +299,7 @@ jobs:
             exit 1
           fi
           SLOT="$(getprop ro.boot.slot_suffix 2>/dev/null || true)"
-          for p in /dev/block/by-name/boot\( {SLOT} /dev/block/bootdevice/by-name/boot \){SLOT} /dev/block/by-name/boot /dev/block/bootdevice/by-name/boot; do
+          for p in /dev/block/by-name/boot${SLOT} /dev/block/bootdevice/by-name/boot${SLOT} /dev/block/by-name/boot /dev/block/bootdevice/by-name/boot; do
             if [ -e "$p" ]; then
               echo "Flashing to: $p"
               dd if="$IMG" of="$p" bs=4096
@@ -324,9 +321,9 @@ jobs:
             local REPO="$1"
             local NAME="$2"
             [ -z "$REPO" ] && return 0
-            URL=\( (curl -s "https://api.github.com/repos/ \){REPO}/releases/latest" \
+            URL=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" \
               | jq -r '.assets[] | select(.name|endswith(".apk")) | .browser_download_url' | head -1)
-            [ -n "$URL" ] && curl -sL "\( URL" -o "managers/ \){NAME}.apk"
+            [ -n "$URL" ] && curl -sL "${URL}" -o "managers/${NAME}.apk"
           }
           download_apk "$MGR1_REPO" "$MGR1_NAME"
           download_apk "$MGR2_REPO" "$MGR2_NAME"
@@ -412,7 +409,7 @@ jobs:
       - name: Upload main artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "KSU [\( {{ inputs.gki_source }}] [ \){{ env.KMI }}]"
+          name: "KSU [${{ inputs.gki_source }}] [${{ env.KMI }}]"
           path: |
             patched_boot.img
             Flashable_AnyKernel3.zip
@@ -445,5 +442,3 @@ jobs:
           | SuperKey                  | ${{ env.SUPERKEY }} |
           | ReSukiSU Spoofed APK      | ${{ env.RESUKISU_SPOOFED_FOUND }} |
           EOF
-
-```
