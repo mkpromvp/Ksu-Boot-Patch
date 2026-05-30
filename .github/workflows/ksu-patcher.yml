@@ -34,6 +34,11 @@ on:
         required: false
         type: string
         default: ""
+      susfs_base_url:
+        description: "Optional direct SUSFS kernel URL for ReSukiSU+SUSFS mode (.img/.gz/.zip)"
+        required: false
+        type: string
+        default: ""
       superkey:
         description: "SuperKey for ReSukiSU (empty = auto generate)"
         required: false
@@ -333,69 +338,142 @@ jobs:
           KFILE_CLEAN="${KFILE#./}"
           mkdir -p kp_work
 
-          # ReSukiSU+SUSFS mode: always patch on top of a SUSFS-enabled GKI base.
-          KMI_L=$(echo "$KMI" | tr '[:upper:]' '[:lower:]')
-          REPOS="WildKernels/GKI_KernelSU_SUSFS zzh20188/GKI_KernelSU_SUSFS"
-          SUSFS_URL=""
+          patch_resukisu() {
+            local INPUT_IMG="$1"
+            local OUTPUT_IMG="$2"
+            local RAW_IMG="$3"
+            local PATCHED_IMG="$4"
 
-          for REPO in $REPOS; do
-            RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" || true)
-            [ -n "$RELEASE_JSON" ] || continue
+            ./magiskboot decompress "$INPUT_IMG" "$RAW_IMG" 2>/dev/null || cp "$INPUT_IMG" "$RAW_IMG"
+            [ -s "$RAW_IMG" ] || { echo "::error::Failed to prepare raw kernel from $INPUT_IMG"; exit 1; }
 
-            SUSFS_URL=$(echo "$RELEASE_JSON" \
-              | jq -r --arg kmi "$KMI_L" '[.assets[]
-                | select(.name | ascii_downcase | contains($kmi))
-                | select(.name | ascii_downcase | contains("susfs"))
-                | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
-                | sort_by(.created_at) | last | .browser_download_url // empty' \
-              | head -1)
+            ./kptools-linux \
+              --patch \
+              --image "$RAW_IMG" \
+              --skey "$SKEY" \
+              --kpimg kpimg-android \
+              --out "$PATCHED_IMG"
 
-            if [ -n "$SUSFS_URL" ] && [ "$SUSFS_URL" != "null" ]; then
-              echo "SUSFS_BASE_REPO=$REPO" >> "$GITHUB_ENV"
-              break
+            [ -s "$PATCHED_IMG" ] || { echo "::error::kptools produced empty output"; exit 1; }
+            cp "$PATCHED_IMG" "$OUTPUT_IMG"
+          }
+
+          # Stage 1: apply ReSukiSU on stock kernel first.
+          cp "workspace/${KFILE_CLEAN}" kp_work/kernel_stock_original
+          patch_resukisu \
+            kp_work/kernel_stock_original \
+            kp_work/kernel_resukisu_stage1 \
+            kp_work/kernel_stock_raw_stage1 \
+            kp_work/kernel_stage1_patched
+
+          cmp -s kp_work/kernel_stock_raw_stage1 kp_work/kernel_stage1_patched \
+            && { echo "::error::Stage1 ReSukiSU patch produced no change"; exit 1; }
+
+          # Stage 2: ensure SUSFS exists after ReSukiSU stage.
+          FINAL_BASE="kp_work/kernel_resukisu_stage1"
+          if ! strings "$FINAL_BASE" 2>/dev/null | grep -Eiq 'susfs|sus_su|ksu_susfs'; then
+            KMI_L=$(echo "$KMI" | tr '[:upper:]' '[:lower:]')
+            KSHORT_L=$(echo "$KSHORT" | tr '[:upper:]' '[:lower:]')
+            ANDROID_L=$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')
+            REPOS="WildKernels/GKI_KernelSU_SUSFS zzh20188/GKI_KernelSU_SUSFS"
+            SUSFS_URL=""
+
+            if [ -n "${{ inputs.susfs_base_url }}" ]; then
+              SUSFS_URL="${{ inputs.susfs_base_url }}"
+              echo "SUSFS_BASE_REPO=manual-url" >> "$GITHUB_ENV"
+            else
+              for REPO in $REPOS; do
+                RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" || true)
+                [ -n "$RELEASE_JSON" ] || continue
+
+                # Prefer exact KMI first.
+                SUSFS_URL=$(echo "$RELEASE_JSON" \
+                  | jq -r --arg kmi "$KMI_L" '[.assets[]
+                    | select(.name | ascii_downcase | contains("susfs"))
+                    | select(.name | ascii_downcase | contains($kmi))
+                    | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
+                    | sort_by(.created_at) | last | .browser_download_url // empty' \
+                  | head -1)
+
+                # Fallback 1: same kernel short + android tag.
+                if [ -z "$SUSFS_URL" ] || [ "$SUSFS_URL" = "null" ]; then
+                  SUSFS_URL=$(echo "$RELEASE_JSON" \
+                    | jq -r --arg kshort "$KSHORT_L" --arg android "$ANDROID_L" '[.assets[]
+                      | select(.name | ascii_downcase | contains("susfs"))
+                      | select(.name | ascii_downcase | contains($kshort))
+                      | select(.name | ascii_downcase | contains($android))
+                      | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
+                      | sort_by(.created_at) | last | .browser_download_url // empty' \
+                    | head -1)
+                fi
+
+                # Fallback 2: same kernel short only.
+                if [ -z "$SUSFS_URL" ] || [ "$SUSFS_URL" = "null" ]; then
+                  SUSFS_URL=$(echo "$RELEASE_JSON" \
+                    | jq -r --arg kshort "$KSHORT_L" '[.assets[]
+                      | select(.name | ascii_downcase | contains("susfs"))
+                      | select(.name | ascii_downcase | contains($kshort))
+                      | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
+                      | sort_by(.created_at) | last | .browser_download_url // empty' \
+                    | head -1)
+                fi
+
+                # Fallback 3: any SUSFS build.
+                if [ -z "$SUSFS_URL" ] || [ "$SUSFS_URL" = "null" ]; then
+                  SUSFS_URL=$(echo "$RELEASE_JSON" \
+                    | jq -r '[.assets[]
+                      | select(.name | ascii_downcase | contains("susfs"))
+                      | select(.name | ascii_downcase | test("\\.(zip|gz|img)$"))]
+                      | sort_by(.created_at) | last | .browser_download_url // empty' \
+                    | head -1)
+                fi
+
+                if [ -n "$SUSFS_URL" ] && [ "$SUSFS_URL" != "null" ]; then
+                  echo "SUSFS_BASE_REPO=$REPO" >> "$GITHUB_ENV"
+                  break
+                fi
+              done
             fi
-          done
 
-          [ -n "$SUSFS_URL" ] && [ "$SUSFS_URL" != "null" ] \
-            || { echo "::error::No SUSFS GKI base found for KMI=$KMI"; exit 1; }
+            [ -n "$SUSFS_URL" ] && [ "$SUSFS_URL" != "null" ] \
+              || { echo "::error::No SUSFS base found for KMI=$KMI. Set susfs_base_url input."; exit 1; }
 
-          curl -fL "$SUSFS_URL" -o kp_work/susfs_asset
+            curl -fL "$SUSFS_URL" -o kp_work/susfs_asset
+            if file kp_work/susfs_asset | grep -qi zip; then
+              unzip -q kp_work/susfs_asset -d kp_work/extract/
+              BASE_IMG=$(find kp_work/extract -type f \
+                \( -name "Image" -o -name "Image.gz" -o -name "kernel" -o -name "kernel.gz" -o -name "*.img" \) \
+                | head -1 || true)
+            else
+              BASE_IMG="kp_work/susfs_asset"
+            fi
 
-          if file kp_work/susfs_asset | grep -qi zip; then
-            unzip -q kp_work/susfs_asset -d kp_work/extract/
-            BASE_IMG=$(find kp_work/extract -type f \
-              \( -name "Image" -o -name "Image.gz" -o -name "kernel" -o -name "kernel.gz" -o -name "*.img" \) \
-              | head -1 || true)
-          else
-            BASE_IMG="kp_work/susfs_asset"
+            [ -n "$BASE_IMG" ] && [ -s "$BASE_IMG" ] \
+              || { echo "::error::Cannot extract kernel from SUSFS asset"; exit 1; }
+
+            ./magiskboot decompress "$BASE_IMG" kp_work/kernel_susfs_raw 2>/dev/null || cp "$BASE_IMG" kp_work/kernel_susfs_raw
+            [ -s kp_work/kernel_susfs_raw ] || { echo "::error::Failed to decode SUSFS base kernel"; exit 1; }
+
+            strings kp_work/kernel_susfs_raw 2>/dev/null | grep -Eiq 'susfs|sus_su|ksu_susfs' \
+              || { echo "::error::Selected SUSFS base has no SUSFS signature"; exit 1; }
+
+            # User request: apply SUSFS after ReSukiSU stage, then re-apply ReSukiSU to keep both.
+            cp kp_work/kernel_susfs_raw kp_work/kernel_after_susfs
+            patch_resukisu \
+              kp_work/kernel_after_susfs \
+              kp_work/kernel_final_raw \
+              kp_work/kernel_after_susfs_raw \
+              kp_work/kernel_final_patched
+
+            FINAL_BASE="kp_work/kernel_final_raw"
           fi
 
-          [ -n "$BASE_IMG" ] && [ -s "$BASE_IMG" ] \
-            || { echo "::error::Cannot extract kernel from SUSFS base asset"; exit 1; }
+          strings "$FINAL_BASE" 2>/dev/null | grep -Eiq 'kernelsu|ksud|/data/adb/ksu|resukisu|sukisu' \
+            || { echo "::error::Final ReSukiSU+SUSFS kernel missing KSU signature"; exit 1; }
+          strings "$FINAL_BASE" 2>/dev/null | grep -Eiq 'susfs|sus_su|ksu_susfs' \
+            || { echo "::error::Final ReSukiSU+SUSFS kernel missing SUSFS signature"; exit 1; }
 
-          ./magiskboot decompress "$BASE_IMG" kp_work/kernel_stock_raw 2>/dev/null || cp "$BASE_IMG" kp_work/kernel_stock_raw
-          [ -s kp_work/kernel_stock_raw ] || { echo "::error::SUSFS base kernel extraction failed"; exit 1; }
-
-          strings kp_work/kernel_stock_raw 2>/dev/null | grep -Eiq 'susfs|sus_su|ksu_susfs' \
-            || { echo "::error::Selected SUSFS base does not contain SUSFS signatures"; exit 1; }
-
-          KERNEL_FOR_PATCH="kp_work/kernel_stock_raw"
-
-          ./kptools-linux \
-            --patch \
-            --image "$KERNEL_FOR_PATCH" \
-            --skey "$SKEY" \
-            --kpimg kpimg-android \
-            --out kp_work/kernel_patched
-
-          [ -s kp_work/kernel_patched ] \
-            || { echo "::error::kptools produced empty output"; exit 1; }
-
-          # Guardrail: reject no-op output so user does not flash unpatched boot.
-          cmp -s "$KERNEL_FOR_PATCH" kp_work/kernel_patched \
-            && { echo "::error::Patched kernel is identical to input (no KSU patch applied)"; exit 1; }
-
-          cp kp_work/kernel_patched out/Image
+          cp "$FINAL_BASE" out/Image
 
           ORIG_COMP_TYPE=$(file "workspace/${KFILE_CLEAN}" | grep -oiE 'gzip|lz4|lzma|xz|bzip2' | head -1 || true)
           if [ -n "$ORIG_COMP_TYPE" ]; then
