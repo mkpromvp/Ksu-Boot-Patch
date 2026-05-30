@@ -328,6 +328,13 @@ jobs:
           download_apk "$MGR1_REPO" "$MGR1_NAME"
           download_apk "$MGR2_REPO" "$MGR2_NAME"
 
+      - name: Setup Java 21 for App Build
+        if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
       - name: Build ReSukiSU manager
         if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
         run: |
