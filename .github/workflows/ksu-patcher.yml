@@ -23,7 +23,7 @@ on:
           - "Stock-Boot"
           - "ReSukiSU+SUSFS"
       superkey:
-        description: "SuperKey for ReSukiSU (empty = auto generate)"
+        description: "SuperKey for ReSukiSU (empty = auto)"
         required: false
         type: string
         default: ""
@@ -96,6 +96,7 @@ jobs:
           if [ "$(stat -c%s magisk.apk)" -lt 100000 ]; then
             APK="$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
               | jq -r '.assets[] | select(.name | test("^Magisk-v[0-9].*\\.apk$")) | .browser_download_url' | head -1)"
+            [ -n "$APK" ] && [ "$APK" != "null" ] || { echo "::error::Cannot get Magisk apk"; exit 1; }
             curl -sL "$APK" -o magisk.apk
           fi
           unzip -jq magisk.apk "lib/x86_64/libmagiskboot.so" -d .
@@ -166,6 +167,21 @@ jobs:
               ;;
           esac
 
+      - name: Download GKI asset
+        if: ${{ inputs.gki_source == 'WildKernels' || inputs.gki_source == 'zzh20188' }}
+        run: |
+          set -e
+          RELEASE=\( (curl -s "https://api.github.com/repos/ \){SRC_REPO}/releases" | jq '.[0]')
+          URL=""
+          if [ -n "$KVER" ] && [ "$KVER" != "unknown" ]; then
+            URL=$(echo "$RELEASE" | jq -r --arg v "$KVER" --arg a "$ANDROID" '.assets[] | select((.name|contains($v)) and (.name|contains(\( a)) and (.name|test("AnyKernel|\\.zip|Image \)"))) | .browser_download_url' | head -1 || true)
+          fi
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            URL=$(echo "\( RELEASE" | jq -r '.assets[] | select(.name|test("AnyKernel.*\\.zip|Image \)")) | .browser_download_url' | head -1 || true)
+          fi
+          [ -n "$URL" ] && [ "$URL" != "null" ] || { echo "::error::No matching GKI asset"; exit 1; }
+          curl -L --progress-bar "$URL" -o gki_asset
+
       - name: Patch kernel (ReSukiSU+SUSFS)
         if: ${{ inputs.gki_source == 'ReSukiSU+SUSFS' }}
         run: |
@@ -178,16 +194,9 @@ jobs:
           echo "$SKEY" > superkey.txt
           echo "SUPERKEY=$SKEY" >> "$GITHUB_ENV"
 
-          echo "=== ReSukiSU SuperKey ===" >> report/patch_report.txt
-          echo "SuperKey: $SKEY" >> report/patch_report.txt
-
-          # Download KernelPatch tools
           KP_RELEASE=$(curl -s https://api.github.com/repos/bmax121/KernelPatch/releases/latest)
           KPTOOLS_URL=$(echo "$KP_RELEASE" | jq -r '.assets[] | select(.name | test("kptools.*linux"; "i")) | .browser_download_url' | head -1)
           KPIMG_URL=$(echo "$KP_RELEASE" | jq -r '.assets[] | select(.name | test("^kpimg")) | .browser_download_url' | head -1)
-
-          [ -n "$KPTOOLS_URL" ] && [ "$KPTOOLS_URL" != "null" ] || { echo "::error::kptools not found"; exit 1; }
-          [ -n "$KPIMG_URL" ] && [ "$KPIMG_URL" != "null" ] || { echo "::error::kpimg not found"; exit 1; }
 
           curl -fL "$KPTOOLS_URL" -o kptools
           curl -fL "$KPIMG_URL" -o kpimg
@@ -207,7 +216,6 @@ jobs:
             --out kp_work/patched_kernel
 
           [ -s kp_work/patched_kernel ] || { echo "::error::patched_kernel not generated"; exit 1; }
-
           cp kp_work/patched_kernel out/Image
 
           cd workspace
@@ -258,6 +266,7 @@ jobs:
           curl -fL "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip" -o ak3.zip
           unzip -q ak3.zip
           AK3="AnyKernel3-master"
+          [ -d "$AK3" ] || { echo "::error::AnyKernel3 folder not found"; exit 1; }
 
           cp out/Image "$AK3/Image"
 
@@ -280,14 +289,6 @@ jobs:
             SUSFS_KERNEL="yes"
           fi
           echo "SUSFS_KERNEL=$SUSFS_KERNEL" >> "$GITHUB_ENV"
-
-          {
-            echo "KSU patch report"
-            echo "Source: ${{ inputs.gki_source }}"
-            echo "Kernel version: $KVER"
-            echo "KMI: $KMI"
-            echo "SUSFS in kernel: $SUSFS_KERNEL"
-          } > report/patch_report.txt
 
       - name: Create root boot flasher script
         run: |
@@ -322,8 +323,10 @@ jobs:
             local NAME="$2"
             [ -z "$REPO" ] && return 0
             URL=\( (curl -s "https://api.github.com/repos/ \){REPO}/releases/latest" \
-              | jq -r '.assets[] | select(.name|endswith(".apk")) | .browser_download_url' | head -1)
-            [ -n "$URL" ] && curl -sL "\( URL" -o "managers/ \){NAME}.apk"
+              | jq -r '.assets[] | select(.name|endswith(".apk")) | .browser_download_url' | head -1 || true)
+            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+              curl -sL "\( URL" -o "managers/ \){NAME}.apk"
+            fi
           }
           download_apk "$MGR1_REPO" "$MGR1_NAME"
           download_apk "$MGR2_REPO" "$MGR2_NAME"
@@ -335,14 +338,10 @@ jobs:
           mkdir -p managers
           RELEASE_JSON=$(curl -s "https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest")
 
-          # Normal APK
-          NORMAL_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".apk") and (test("spoof|Spoof|magisk|Magisk") | not)) | .browser_download_url' | head -1)
-          if [ -n "$NORMAL_URL" ] && [ "$NORMAL_URL" != "null" ]; then
-            curl -sL "$NORMAL_URL" -o "managers/SukiSU_Manager_Normal.apk"
-          fi
+          NORMAL_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".apk") and (test("spoof|Spoof|magisk|Magisk") | not)) | .browser_download_url' | head -1 || true)
+          [ -n "$NORMAL_URL" ] && [ "$NORMAL_URL" != "null" ] && curl -sL "$NORMAL_URL" -o "managers/SukiSU_Manager_Normal.apk"
 
-          # Spoofed APK
-          SPOOFED_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".apk") and (test("spoof|Spoof|magisk|Magisk"))) | .browser_download_url' | head -1)
+          SPOOFED_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".apk") and test("spoof|Spoof|magisk|Magisk")) | .browser_download_url' | head -1 || true)
           if [ -n "$SPOOFED_URL" ] && [ "$SPOOFED_URL" != "null" ]; then
             curl -sL "$SPOOFED_URL" -o "managers/SukiSU_Manager_Spoofed.apk"
             echo "RESUKISU_SPOOFED_FOUND=yes" >> "$GITHUB_ENV"
@@ -356,7 +355,7 @@ jobs:
           set -e
           mkdir -p modules
           URL=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest \
-            | jq -r '.assets[] | select(.name|endswith(".zip")) | .browser_download_url' | head -1)
+            | jq -r '.assets[] | select(.name|endswith(".zip")) | .browser_download_url' | head -1 || true)
           curl -sL "${URL:-https://github.com/sidex15/ksu_module_susfs/releases/download/v1.5.1/ksu_module_susfs_v1.5.1.zip}" -o modules/ksu_module_susfs.zip
           echo "SUSFS_MODULE=yes" >> "$GITHUB_ENV"
 
@@ -365,15 +364,19 @@ jobs:
         run: |
           set -e
           mkdir -p modules
-          curl -sL "https://github.com/Dr-TSNG/ZygiskNext/releases/latest/download/ZygiskNext-v1.1.0.zip" -o modules/ZygiskNext.zip
-          curl -sL "https://github.com/LSPosed/LSPosed.github.io/releases/latest/download/Shamiko-v1.1.1.zip" -o modules/Shamiko.zip
+          Z=$(curl -s https://api.github.com/repos/Dr-TSNG/ZygiskNext/releases/latest | jq -r '.assets[] | select(.name|endswith(".zip")) | .browser_download_url' | head -1)
+          curl -sL "${Z:-https://github.com/Dr-TSNG/ZygiskNext/releases/download/v1.1.0/ZygiskNext-v1.1.0.zip}" -o modules/ZygiskNext.zip
+
+          S=$(curl -s https://api.github.com/repos/LSPosed/LSPosed.github.io/releases/latest | jq -r '.assets[] | select(.name|test("Shamiko")) | .browser_download_url' | head -1)
+          curl -sL "${S:-https://github.com/LSPosed/LSPosed.github.io/releases/download/v1.1.1/Shamiko-v1.1.1.zip}" -o modules/Shamiko.zip
 
       - name: Download LSPosed
         if: ${{ inputs.include_lsposed }}
         run: |
           set -e
           mkdir -p modules
-          curl -sL "https://github.com/LSPosed/LSPosed/releases/latest/download/LSPosed-v1.9.2-mod.zip" -o modules/LSPosed.zip
+          URL=$(curl -s https://api.github.com/repos/LSPosed/LSPosed/releases/latest | jq -r '.assets[] | select(.name|test("LSPosed.*Zygisk")) | .browser_download_url' | head -1)
+          curl -sL "${URL:-https://github.com/LSPosed/LSPosed/releases/download/v1.9.2/LSPosed-v1.9.2-mod.zip}" -o modules/LSPosed.zip
 
       - name: Upload main artifact
         uses: actions/upload-artifact@v4
@@ -385,7 +388,7 @@ jobs:
             flash_boot_root.sh
             managers/
             superkey.txt
-            report/patch_report.txt
+            report/
           retention-days: 7
 
       - name: Upload modules artifact
@@ -402,12 +405,12 @@ jobs:
           cat > "$GITHUB_STEP_SUMMARY" << EOF
           ## KSU Boot Patcher Result
 
-          | Property                  | Value |
-          |---------------------------|-------|
-          | Source                    | ${{ inputs.gki_source }} |
-          | Kernel Version            | ${{ env.KVER }} |
-          | KMI                       | ${{ env.KMI }} |
-          | SUSFS in Kernel           | ${{ env.SUSFS_KERNEL }} |
-          | SuperKey                  | ${{ env.SUPERKEY }} |
-          | ReSukiSU Spoofed APK      | ${{ env.RESUKISU_SPOOFED_FOUND }} |
+          | Property | Value |
+          |----------|-------|
+          | Source | ${{ inputs.gki_source }} |
+          | Kernel Version | ${{ env.KVER }} |
+          | KMI | ${{ env.KMI }} |
+          | SUSFS in kernel | ${{ env.SUSFS_KERNEL }} |
+          | SuperKey | ${{ env.SUPERKEY }} |
+          | ReSukiSU Spoofed | ${{ env.RESUKISU_SPOOFED_FOUND }} |
           EOF
