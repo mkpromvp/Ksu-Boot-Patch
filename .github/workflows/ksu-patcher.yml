@@ -25,7 +25,7 @@ on:
       wifi_fix_mode:
         description: "WiFi safety policy for kernel >= 6.6"
         required: true
-        default: "auto"
+        default: "strict"
         type: choice
         options:
           - "auto"
@@ -221,7 +221,7 @@ jobs:
           echo "$FILTERED" > releases.json
           jq '[.[].assets[] | {name: .name, browser_download_url: .browser_download_url}]' releases.json > assets.json
           echo "=== Assets across filtered releases ==="
-          jq -r '.[].name' assets.json | head -200 || true
+          jq -r '.[0:200][]?.name' assets.json || true
 
           rm -f candidates/urls.txt
           touch candidates/urls.txt
@@ -693,36 +693,127 @@ jobs:
           set -e
           mkdir -p modules
 
-          URL=$(curl -sf "https://api.github.com/repos/sidex15/ksu_module_susfs/releases?per_page=20" \
-            | jq -r '[.[].assets[] | select(.name | test("susfs|ksu_module_susfs"; "i") and (.name | endswith(".zip")))]
-                     | sort_by(.updated_at // .created_at)
-                     | reverse
-                     | .[0].browser_download_url // empty' \
-            || true)
+          gh_api() {
+            local URL="$1"
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "User-Agent: KSU-Boot-Patcher" \
+              "$URL" || true
+          }
+
+          latest_zip_from_releases_array() {
+            jq -r '
+              if type == "array" then
+                [ .[]?
+                  | .assets? // []
+                  | .[]?
+                  | select(
+                      ((.name? // "") | test("susfs|ksu_module_susfs"; "i")) and
+                      ((.name? // "") | endswith(".zip"))
+                    )
+                  | {
+                      url: (.browser_download_url // ""),
+                      t: (.updated_at // .created_at // "1970-01-01T00:00:00Z")
+                    }
+                ]
+                | map(select(.url != ""))
+                | sort_by(.t)
+                | reverse
+                | .[0].url // empty
+              else
+                empty
+              end
+            '
+          }
+
+          latest_zip_from_release_object() {
+            jq -r '
+              if type == "object" then
+                [ .assets[]?
+                  | select(
+                      ((.name? // "") | test("susfs|ksu_module_susfs"; "i")) and
+                      ((.name? // "") | endswith(".zip"))
+                    )
+                  | {
+                      url: (.browser_download_url // ""),
+                      t: (.updated_at // .created_at // "1970-01-01T00:00:00Z")
+                    }
+                ]
+                | map(select(.url != ""))
+                | sort_by(.t)
+                | reverse
+                | .[0].url // empty
+              else
+                empty
+              end
+            '
+          }
+
+          URL=""
+
+          JSON1=$(gh_api "https://api.github.com/repos/sidex15/ksu_module_susfs/releases?per_page=20")
+          if [ -n "$JSON1" ]; then
+            URL=$(echo "$JSON1" | latest_zip_from_releases_array || true)
+          fi
 
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            ALL_REL=$(curl -sf "https://api.github.com/repos/zzh20188/GKI_KernelSU_SUSFS/releases?per_page=10")
-            if [ "$SRC_USE_PRERELEASE" = "true" ]; then
-              REL_J=$(echo "$ALL_REL" | jq 'map(select(.prerelease==true)) | .[0]')
-            else
-              REL_J=$(echo "$ALL_REL" | jq 'map(select(.prerelease==false)) | .[0]')
+            ALL_REL=$(gh_api "https://api.github.com/repos/zzh20188/GKI_KernelSU_SUSFS/releases?per_page=10")
+            REL_J=""
+            if [ -n "$ALL_REL" ]; then
+              if [ "$SRC_USE_PRERELEASE" = "true" ]; then
+                REL_J=$(echo "$ALL_REL" | jq 'if type=="array" then map(select(.prerelease==true)) | .[0] else {} end' || true)
+              else
+                REL_J=$(echo "$ALL_REL" | jq 'if type=="array" then map(select(.prerelease==false)) | .[0] else {} end' || true)
+              fi
             fi
-            URL=$(echo "$REL_J" | jq -r '.assets[] | select(.name | test("ksu_module_susfs|susfs.*\.zip"; "i")) | .browser_download_url' | head -1 || true)
+            if [ -n "$REL_J" ]; then
+              URL=$(echo "$REL_J" | latest_zip_from_release_object || true)
+            fi
           fi
 
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            URL=$(curl -sf https://api.github.com/repos/SukiSU-Ultra/SukiSU_module/releases/latest \
-              | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' \
-              | head -1 || true)
+            JSON3=$(gh_api "https://api.github.com/repos/SukiSU-Ultra/SukiSU_module/releases/latest")
+            if [ -n "$JSON3" ]; then
+              URL=$(echo "$JSON3" | jq -r '
+                if type == "object" then
+                  [ .assets[]?
+                    | select((.name? // "") | endswith(".zip"))
+                    | {url: (.browser_download_url // ""), t: (.updated_at // .created_at // "1970-01-01T00:00:00Z")}
+                  ]
+                  | map(select(.url != ""))
+                  | sort_by(.t)
+                  | reverse
+                  | .[0].url // empty
+                else
+                  empty
+                end
+              ' || true)
+            fi
           fi
 
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            URL=$(curl -sf "https://api.github.com/repos/simonpunk/susfs4ksu-module/releases?per_page=10" \
-              | jq -r '[.[].assets[] | select(.name | test("susfs"; "i") and (.name | endswith(".zip")))]
-                       | sort_by(.updated_at // .created_at)
-                       | reverse
-                       | .[0].browser_download_url // empty' \
-              || true)
+            JSON4=$(gh_api "https://api.github.com/repos/simonpunk/susfs4ksu-module/releases?per_page=10")
+            if [ -n "$JSON4" ]; then
+              URL=$(echo "$JSON4" | jq -r '
+                if type == "array" then
+                  [ .[]?
+                    | .assets? // []
+                    | .[]?
+                    | select(
+                        ((.name? // "") | test("susfs"; "i")) and
+                        ((.name? // "") | endswith(".zip"))
+                      )
+                    | {url: (.browser_download_url // ""), t: (.updated_at // .created_at // "1970-01-01T00:00:00Z")}
+                  ]
+                  | map(select(.url != ""))
+                  | sort_by(.t)
+                  | reverse
+                  | .[0].url // empty
+                else
+                  empty
+                end
+              ' || true)
+            fi
           fi
 
           [ -n "$URL" ] && [ "$URL" != "null" ] || { echo "::error::Cannot find a SUSFS module zip from known sources"; exit 1; }
