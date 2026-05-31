@@ -23,7 +23,7 @@ on:
           - "KernelSU-Next"
           - "Stock-Boot"
       wifi_fix_mode:
-        description: "WiFi safety policy for 6.12.x"
+        description: "WiFi safety policy for kernel >= 6.6"
         required: true
         default: "auto"
         type: choice
@@ -97,7 +97,7 @@ jobs:
           curl -sL "https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk" -o magisk.apk || true
           if [ "$(stat -c%s magisk.apk 2>/dev/null || echo 0)" -lt 100000 ]; then
             APK=$(curl -sf https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
-              | jq -r '.assets[] | select(.name | test("^Magisk-v[0-9].*\\.apk$")) | .browser_download_url' \
+              | jq -r '.assets[] | select(.name | test("^Magisk-v[0-9].*\.apk$")) | .browser_download_url' \
               | head -1)
             [ -n "$APK" ] && [ "$APK" != "null" ] || { echo "::error::Cannot find Magisk APK"; exit 1; }
             curl -sL "$APK" -o magisk.apk
@@ -136,7 +136,7 @@ jobs:
           KMAJOR=$(echo "$KVER" | cut -d. -f1 || echo 0)
           KMINOR=$(echo "$KVER" | cut -d. -f2 || echo 0)
           NEED_WIFI_FIX="no"
-          if [ "$KMAJOR" = "6" ] && [ "$KMINOR" = "12" ]; then
+          if [ "$KMAJOR" = "6" ] && [ "$KMINOR" -ge 6 ]; then
             NEED_WIFI_FIX="yes"
           fi
 
@@ -202,7 +202,7 @@ jobs:
           REPO="$SRC_REPO"
           USE_PRE="$SRC_USE_PRERELEASE"
 
-          ALL_RELEASES=$(curl -sf "https://api.github.com/repos/${REPO}/releases?per_page=10")
+          ALL_RELEASES=$(curl -sf "https://api.github.com/repos/${REPO}/releases?per_page=20")
           if [ "$USE_PRE" = "true" ]; then
             RELEASE=$(echo "$ALL_RELEASES" | jq 'map(select(.prerelease == true)) | .[0]')
           else
@@ -219,6 +219,39 @@ jobs:
 
           rm -f candidates/urls.txt
           touch candidates/urls.txt
+
+          jq -r --arg kv "$KVER" '
+            .assets[]
+            | select(
+                (.name | ascii_downcase | contains("anykernel3")) and
+                (.name | ascii_downcase | contains("bypass")) and
+                (.name | contains($kv)) and
+                (.name | endswith(".zip"))
+              )
+            | .browser_download_url
+          ' release.json >> candidates/urls.txt
+
+          jq -r --arg ks "$KSHORT" --arg an "$ANDROID" '
+            .assets[]
+            | select(
+                (.name | ascii_downcase | contains("anykernel3")) and
+                (.name | ascii_downcase | contains("bypass")) and
+                (.name | contains($ks)) and
+                (.name | ascii_downcase | contains($an)) and
+                (.name | endswith(".zip"))
+              )
+            | .browser_download_url
+          ' release.json >> candidates/urls.txt
+
+          jq -r '
+            .assets[]
+            | select(
+                (.name | ascii_downcase | contains("anykernel3")) and
+                (.name | ascii_downcase | contains("bypass")) and
+                (.name | endswith(".zip"))
+              )
+            | .browser_download_url
+          ' release.json >> candidates/urls.txt
 
           jq -r --arg kv "$KVER" --arg an "$ANDROID" '
             .assets[]
@@ -269,6 +302,7 @@ jobs:
           BEST_IMG=""
           BEST_SUSFS="no"
           BEST_WIFI="no"
+          BEST_BYPASS="no"
           i=0
 
           need_wifi="no"
@@ -310,15 +344,21 @@ jobs:
             SCORE=0
             HAS_SUSFS="no"
             HAS_WIFI="no"
+            HAS_BYPASS="no"
 
             if strings "$OUTK" 2>/dev/null | grep -Eiq 'susfs|ksu_susfs|sus_su'; then
               HAS_SUSFS="yes"
               SCORE=$((SCORE+60))
             fi
 
-            if strings "$OUTK" 2>/dev/null | grep -Eiq 'cfg80211|mac80211|ath10k|ath11k|mt76|wlan|wcn'; then
+            if strings "$OUTK" 2>/dev/null | grep -Eiq 'cfg80211|mac80211|ath10k|ath11k|mt76|wlan|wcn|ath12k|iwlwifi|brcmfmac'; then
               HAS_WIFI="yes"
-              SCORE=$((SCORE+40))
+              SCORE=$((SCORE+50))
+            fi
+
+            if echo "$URL" | grep -qiE 'bypass'; then
+              HAS_BYPASS="yes"
+              SCORE=$((SCORE+80))
             fi
 
             if echo "$URL" | grep -qi "$KVER"; then
@@ -327,7 +367,7 @@ jobs:
               SCORE=$((SCORE+15))
             fi
 
-            if echo "$URL" | grep -Eiq 'wifi|wlan|ath|mt76|cfg80211|mac80211|fix'; then
+            if echo "$URL" | grep -Eiq 'wifi|wlan|ath|mt76|cfg80211|mac80211|fix|bypass'; then
               SCORE=$((SCORE+10))
             fi
 
@@ -335,16 +375,18 @@ jobs:
               SCORE=$((SCORE+10))
             fi
 
-            echo "score=$SCORE susfs=$HAS_SUSFS wifi=$HAS_WIFI"
+            echo "score=$SCORE susfs=$HAS_SUSFS wifi=$HAS_WIFI bypass=$HAS_BYPASS"
 
             if [ "$HAS_SUSFS" != "yes" ]; then
               echo "skip: SUSFS missing"
               continue
             fi
 
-            if [ "$need_wifi" = "yes" ] && [ "${{ inputs.wifi_fix_mode }}" = "strict" ] && [ "$HAS_WIFI" != "yes" ]; then
-              echo "skip: strict mode requires WiFi symbols"
-              continue
+            if [ "$need_wifi" = "yes" ] && [ "${{ inputs.wifi_fix_mode }}" = "strict" ]; then
+              if [ "$HAS_WIFI" != "yes" ] && [ "$HAS_BYPASS" != "yes" ]; then
+                echo "skip: strict mode requires WiFi symbols or Bypass build"
+                continue
+              fi
             fi
 
             if [ "$SCORE" -gt "$BEST_SCORE" ]; then
@@ -353,6 +395,7 @@ jobs:
               BEST_IMG="$OUTK"
               BEST_SUSFS="$HAS_SUSFS"
               BEST_WIFI="$HAS_WIFI"
+              BEST_BYPASS="$HAS_BYPASS"
             fi
           done < candidates/urls.txt
 
@@ -361,8 +404,10 @@ jobs:
 
           WIFI_SAFE="unknown"
           if [ "$NEED_WIFI_FIX" = "yes" ]; then
-            if [ "$BEST_WIFI" = "yes" ]; then
-              WIFI_SAFE="yes"
+            if [ "$BEST_BYPASS" = "yes" ]; then
+              WIFI_SAFE="yes (bypass build)"
+            elif [ "$BEST_WIFI" = "yes" ]; then
+              WIFI_SAFE="yes (wifi symbols)"
             else
               WIFI_SAFE="check_release"
             fi
@@ -374,9 +419,10 @@ jobs:
           echo "BEST_SCORE=$BEST_SCORE" >> "$GITHUB_ENV"
           echo "SUSFS_KERNEL=$BEST_SUSFS" >> "$GITHUB_ENV"
           echo "WIFI_SAFE=$WIFI_SAFE" >> "$GITHUB_ENV"
+          echo "WIFI_BYPASS_BUILD=$BEST_BYPASS" >> "$GITHUB_ENV"
 
           echo "Selected candidate: $BEST_URL"
-          echo "score=$BEST_SCORE susfs=$BEST_SUSFS wifi=$BEST_WIFI"
+          echo "score=$BEST_SCORE susfs=$BEST_SUSFS wifi=$BEST_WIFI bypass=$BEST_BYPASS"
 
       - name: Repack with selected kernel
         if: >
@@ -407,6 +453,7 @@ jobs:
           [ -s patched_boot.img ] || { echo "::error::patched_boot.img missing"; exit 1; }
           echo "SUSFS_KERNEL=no" >> "$GITHUB_ENV"
           echo "WIFI_SAFE=yes" >> "$GITHUB_ENV"
+          echo "WIFI_BYPASS_BUILD=no" >> "$GITHUB_ENV"
 
       - name: Build AnyKernel3 flashable zip
         run: |
@@ -432,20 +479,25 @@ jobs:
           set -e
           FINAL_SUSFS="no"
           FINAL_WIFI="no"
+          FINAL_BYPASS="no"
           if strings out/Image 2>/dev/null | grep -Eiq 'susfs|ksu_susfs|sus_su'; then FINAL_SUSFS="yes"; fi
-          if strings out/Image 2>/dev/null | grep -Eiq 'cfg80211|mac80211|ath10k|ath11k|mt76|wlan|wcn'; then FINAL_WIFI="yes"; fi
+          if strings out/Image 2>/dev/null | grep -Eiq 'cfg80211|mac80211|ath10k|ath11k|mt76|wlan|wcn|ath12k|iwlwifi|brcmfmac'; then FINAL_WIFI="yes"; fi
+          if echo "${BEST_URL:-}" | grep -qiE 'bypass'; then FINAL_BYPASS="yes"; fi
 
           echo "FINAL_SUSFS=$FINAL_SUSFS" >> "$GITHUB_ENV"
           echo "FINAL_WIFI=$FINAL_WIFI" >> "$GITHUB_ENV"
+          echo "FINAL_BYPASS=$FINAL_BYPASS" >> "$GITHUB_ENV"
 
           if [ "$FINAL_SUSFS" != "yes" ] && [ "${{ inputs.gki_source }}" != "Stock-Boot" ] && [ "${{ inputs.gki_source }}" != "KernelSU-Next" ]; then
             echo "::error::Selected kernel does not expose SUSFS strings"
             exit 1
           fi
 
-          if [ "$NEED_WIFI_FIX" = "yes" ] && [ "${{ inputs.wifi_fix_mode }}" = "strict" ] && [ "$FINAL_WIFI" != "yes" ]; then
-            echo "::error::Strict WiFi mode enabled but WiFi symbols not detected"
-            exit 1
+          if [ "$NEED_WIFI_FIX" = "yes" ] && [ "${{ inputs.wifi_fix_mode }}" = "strict" ]; then
+            if [ "$FINAL_WIFI" != "yes" ] && [ "$FINAL_BYPASS" != "yes" ]; then
+              echo "::error::Strict WiFi mode enabled but WiFi symbols/Bypass build not detected"
+              exit 1
+            fi
           fi
 
           mkdir -p report
@@ -460,8 +512,10 @@ jobs:
             echo "Best score      : ${BEST_SCORE:-N/A}"
             echo "SUSFS (selected): ${SUSFS_KERNEL:-N/A}"
             echo "WiFi safe       : ${WIFI_SAFE:-N/A}"
+            echo "Bypass build    : ${WIFI_BYPASS_BUILD:-N/A}"
             echo "SUSFS (final)   : $FINAL_SUSFS"
             echo "WiFi (final)    : $FINAL_WIFI"
+            echo "Bypass (final)  : $FINAL_BYPASS"
           } > report/patch_report.txt
           cat report/patch_report.txt
 
@@ -575,7 +629,7 @@ jobs:
             else
               REL_J=$(echo "$ALL_REL" | jq 'map(select(.prerelease==false)) | .[0]')
             fi
-            URL=$(echo "$REL_J" | jq -r '.assets[] | select(.name | test("ksu_module_susfs|susfs.*\\.zip"; "i")) | .browser_download_url' | head -1 || true)
+            URL=$(echo "$REL_J" | jq -r '.assets[] | select(.name | test("ksu_module_susfs|susfs.*\.zip"; "i")) | .browser_download_url' | head -1 || true)
           fi
 
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
@@ -677,12 +731,14 @@ jobs:
             echo "| Source | \`${{ inputs.gki_source }}\` |"
             echo "| Kernel Version | \`${KVER:-unknown}\` |"
             echo "| KMI | \`${KMI:-unknown}\` |"
-            echo "| Need WiFi fix (6.12) | \`${NEED_WIFI_FIX:-unknown}\` |"
+            echo "| Need WiFi fix (>=6.6) | \`${NEED_WIFI_FIX:-unknown}\` |"
             echo "| WiFi policy | \`${{ inputs.wifi_fix_mode }}\` |"
+            echo "| WiFi bypass build | \`${WIFI_BYPASS_BUILD:-unknown}\` |"
             echo "| WiFi safe (selected) | \`${WIFI_SAFE:-unknown}\` |"
             echo "| SUSFS selected | \`${SUSFS_KERNEL:-unknown}\` |"
             echo "| SUSFS final | \`${FINAL_SUSFS:-unknown}\` |"
             echo "| WiFi symbols final | \`${FINAL_WIFI:-unknown}\` |"
+            echo "| Bypass build final | \`${FINAL_BYPASS:-unknown}\` |"
             echo "| Best URL | ${BEST_URL:-N/A} |"
             echo "| Best score | \`${BEST_SCORE:-N/A}\` |"
             if [ "${{ inputs.gki_source }}" = "zzh20188-ReSukiSU" ]; then
@@ -692,4 +748,9 @@ jobs:
             echo "| GoFile AnyKernel3 | ${GOFILE_LINK_ANYKERNEL3:-N/A} |"
             echo "| GoFile Root Script | ${GOFILE_LINK_ROOT_SCRIPT:-N/A} |"
             echo "| GoFile SUSFS Module | ${GOFILE_LINK_SUSFS_MODULE:-N/A} |"
+            if [ "${NEED_WIFI_FIX:-no}" = "yes" ] && [ "${FINAL_BYPASS:-no}" != "yes" ] && [ "${FINAL_WIFI:-no}" != "yes" ]; then
+              echo ""
+              echo "> ⚠️ WiFi warning: kernel >=6.6 and no bypass/WiFi symbols detected."
+              echo "> Use wifi_fix_mode=strict or switch source/release."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
