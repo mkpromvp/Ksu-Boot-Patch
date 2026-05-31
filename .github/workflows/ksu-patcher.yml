@@ -31,6 +31,11 @@ on:
           - "auto"
           - "strict"
           - "off"
+      require_exact_kver:
+        description: "Require exact kernel version+android match (recommended for 6.6+)"
+        required: false
+        type: boolean
+        default: true
       include_susfs_module:
         description: "Download SUSFS userspace module"
         required: false
@@ -202,26 +207,27 @@ jobs:
           REPO="$SRC_REPO"
           USE_PRE="$SRC_USE_PRERELEASE"
 
-          ALL_RELEASES=$(curl -sf "https://api.github.com/repos/${REPO}/releases?per_page=20")
+          ALL_RELEASES=$(curl -sf "https://api.github.com/repos/${REPO}/releases?per_page=40")
           if [ "$USE_PRE" = "true" ]; then
-            RELEASE=$(echo "$ALL_RELEASES" | jq 'map(select(.prerelease == true)) | .[0]')
+            FILTERED=$(echo "$ALL_RELEASES" | jq 'map(select(.prerelease == true))')
           else
-            RELEASE=$(echo "$ALL_RELEASES" | jq 'map(select(.prerelease == false)) | .[0]')
+            FILTERED=$(echo "$ALL_RELEASES" | jq 'map(select(.prerelease == false))')
           fi
 
-          RELEASE_TAG=$(echo "$RELEASE" | jq -r '.tag_name // "unknown"')
+          RELEASE_TAG=$(echo "$FILTERED" | jq -r '.[0].tag_name // "unknown"')
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
-          echo "Selected release: $RELEASE_TAG"
+          echo "Selected release family, top tag: $RELEASE_TAG"
 
-          echo "$RELEASE" > release.json
-          echo "=== Assets ==="
-          jq -r '.assets[] | .name' release.json || true
+          echo "$FILTERED" > releases.json
+          jq '[.[].assets[] | {name: .name, browser_download_url: .browser_download_url}]' releases.json > assets.json
+          echo "=== Assets across filtered releases ==="
+          jq -r '.[].name' assets.json | head -200 || true
 
           rm -f candidates/urls.txt
           touch candidates/urls.txt
 
           jq -r --arg kv "$KVER" '
-            .assets[]
+            .[]
             | select(
                 (.name | ascii_downcase | contains("anykernel3")) and
                 (.name | ascii_downcase | contains("bypass")) and
@@ -229,10 +235,10 @@ jobs:
                 (.name | endswith(".zip"))
               )
             | .browser_download_url
-          ' release.json >> candidates/urls.txt
+          ' assets.json >> candidates/urls.txt
 
           jq -r --arg ks "$KSHORT" --arg an "$ANDROID" '
-            .assets[]
+            .[]
             | select(
                 (.name | ascii_downcase | contains("anykernel3")) and
                 (.name | ascii_downcase | contains("bypass")) and
@@ -241,20 +247,20 @@ jobs:
                 (.name | endswith(".zip"))
               )
             | .browser_download_url
-          ' release.json >> candidates/urls.txt
+          ' assets.json >> candidates/urls.txt
 
           jq -r '
-            .assets[]
+            .[]
             | select(
                 (.name | ascii_downcase | contains("anykernel3")) and
                 (.name | ascii_downcase | contains("bypass")) and
                 (.name | endswith(".zip"))
               )
             | .browser_download_url
-          ' release.json >> candidates/urls.txt
+          ' assets.json >> candidates/urls.txt
 
           jq -r --arg kv "$KVER" --arg an "$ANDROID" '
-            .assets[]
+            .[]
             | select(
                 (.name | ascii_downcase | contains("anykernel3")) and
                 (.name | contains($kv)) and
@@ -262,10 +268,10 @@ jobs:
                 (.name | endswith(".zip"))
               )
             | .browser_download_url
-          ' release.json >> candidates/urls.txt
+          ' assets.json >> candidates/urls.txt
 
           jq -r --arg ks "$KSHORT" --arg an "$ANDROID" '
-            .assets[]
+            .[]
             | select(
                 (.name | ascii_downcase | contains("anykernel3")) and
                 (.name | contains($ks)) and
@@ -273,13 +279,13 @@ jobs:
                 (.name | endswith(".zip"))
               )
             | .browser_download_url
-          ' release.json >> candidates/urls.txt
+          ' assets.json >> candidates/urls.txt
 
           jq -r '
-            .assets[]
+            .[]
             | select((.name | ascii_downcase | contains("anykernel3")) and (.name | endswith(".zip")))
             | .browser_download_url
-          ' release.json >> candidates/urls.txt
+          ' assets.json >> candidates/urls.txt
 
           awk 'NF' candidates/urls.txt | awk '!seen[$0]++' > candidates/urls_clean.txt
           mv candidates/urls_clean.txt candidates/urls.txt
@@ -303,6 +309,8 @@ jobs:
           BEST_SUSFS="no"
           BEST_WIFI="no"
           BEST_BYPASS="no"
+          BEST_EXACT="no"
+          BEST_SUSFS_NEW="no"
           i=0
 
           need_wifi="no"
@@ -345,10 +353,27 @@ jobs:
             HAS_SUSFS="no"
             HAS_WIFI="no"
             HAS_BYPASS="no"
+            HAS_EXACT="no"
+            HAS_SUSFS_NEW="no"
+
+            CKFULL=$(strings "$OUTK" 2>/dev/null | grep -oP 'Linux version \K[^\s]+' | head -1 || true)
+            CKVER=$(echo "$CKFULL" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+            CANDROID=$(echo "$CKFULL" | grep -oP 'android[0-9]+' | head -1 || true)
+            if [ -n "$CKVER" ] && [ -n "$CANDROID" ] && [ "$CKVER" = "$KVER" ] && [ "$CANDROID" = "$ANDROID" ]; then
+              HAS_EXACT="yes"
+              SCORE=$((SCORE+120))
+            elif [ -n "$CKVER" ] && [ -n "$CANDROID" ] && [ "$CANDROID" = "$ANDROID" ] && echo "$CKVER" | grep -q "^${KSHORT}"; then
+              SCORE=$((SCORE+45))
+            fi
 
             if strings "$OUTK" 2>/dev/null | grep -Eiq 'susfs|ksu_susfs|sus_su'; then
               HAS_SUSFS="yes"
               SCORE=$((SCORE+60))
+            fi
+
+            if strings "$OUTK" 2>/dev/null | grep -Eiq 'susfs[^[:alnum:]]*v?(2\.[1-9]|[3-9]\.)|susfs v2\.[1-9]'; then
+              HAS_SUSFS_NEW="yes"
+              SCORE=$((SCORE+25))
             fi
 
             if strings "$OUTK" 2>/dev/null | grep -Eiq 'cfg80211|mac80211|ath10k|ath11k|mt76|wlan|wcn|ath12k|iwlwifi|brcmfmac'; then
@@ -375,7 +400,11 @@ jobs:
               SCORE=$((SCORE+10))
             fi
 
-            echo "score=$SCORE susfs=$HAS_SUSFS wifi=$HAS_WIFI bypass=$HAS_BYPASS"
+            if echo "$URL" | grep -qiE 'exp|experimental'; then
+              SCORE=$((SCORE-15))
+            fi
+
+            echo "score=$SCORE susfs=$HAS_SUSFS susfs_new=$HAS_SUSFS_NEW wifi=$HAS_WIFI bypass=$HAS_BYPASS exact=$HAS_EXACT ckver=${CKVER:-unknown}"
 
             if [ "$HAS_SUSFS" != "yes" ]; then
               echo "skip: SUSFS missing"
@@ -389,6 +418,11 @@ jobs:
               fi
             fi
 
+            if [ "$need_wifi" = "yes" ] && [ "${{ inputs.require_exact_kver }}" = "true" ] && [ "$HAS_EXACT" != "yes" ]; then
+              echo "skip: require_exact_kver=true and candidate is not exact ($CKVER/$CANDROID vs $KVER/$ANDROID)"
+              continue
+            fi
+
             if [ "$SCORE" -gt "$BEST_SCORE" ]; then
               BEST_SCORE="$SCORE"
               BEST_URL="$URL"
@@ -396,6 +430,8 @@ jobs:
               BEST_SUSFS="$HAS_SUSFS"
               BEST_WIFI="$HAS_WIFI"
               BEST_BYPASS="$HAS_BYPASS"
+              BEST_EXACT="$HAS_EXACT"
+              BEST_SUSFS_NEW="$HAS_SUSFS_NEW"
             fi
           done < candidates/urls.txt
 
@@ -404,10 +440,12 @@ jobs:
 
           WIFI_SAFE="unknown"
           if [ "$NEED_WIFI_FIX" = "yes" ]; then
-            if [ "$BEST_BYPASS" = "yes" ]; then
+            if [ "$BEST_BYPASS" = "yes" ] && [ "$BEST_EXACT" = "yes" ]; then
               WIFI_SAFE="yes (bypass build)"
-            elif [ "$BEST_WIFI" = "yes" ]; then
+            elif [ "$BEST_WIFI" = "yes" ] && [ "$BEST_EXACT" = "yes" ]; then
               WIFI_SAFE="yes (wifi symbols)"
+            elif [ "$BEST_EXACT" != "yes" ]; then
+              WIFI_SAFE="unsafe (non-exact kernel match)"
             else
               WIFI_SAFE="check_release"
             fi
@@ -418,11 +456,13 @@ jobs:
           echo "BEST_URL=$BEST_URL" >> "$GITHUB_ENV"
           echo "BEST_SCORE=$BEST_SCORE" >> "$GITHUB_ENV"
           echo "SUSFS_KERNEL=$BEST_SUSFS" >> "$GITHUB_ENV"
+          echo "SUSFS_NEW_HINT=$BEST_SUSFS_NEW" >> "$GITHUB_ENV"
           echo "WIFI_SAFE=$WIFI_SAFE" >> "$GITHUB_ENV"
           echo "WIFI_BYPASS_BUILD=$BEST_BYPASS" >> "$GITHUB_ENV"
+          echo "KERNEL_EXACT_MATCH=$BEST_EXACT" >> "$GITHUB_ENV"
 
           echo "Selected candidate: $BEST_URL"
-          echo "score=$BEST_SCORE susfs=$BEST_SUSFS wifi=$BEST_WIFI bypass=$BEST_BYPASS"
+          echo "score=$BEST_SCORE susfs=$BEST_SUSFS susfs_new=$BEST_SUSFS_NEW wifi=$BEST_WIFI bypass=$BEST_BYPASS exact=$BEST_EXACT"
 
       - name: Repack with selected kernel
         if: >
@@ -452,8 +492,10 @@ jobs:
           cd ..
           [ -s patched_boot.img ] || { echo "::error::patched_boot.img missing"; exit 1; }
           echo "SUSFS_KERNEL=no" >> "$GITHUB_ENV"
+          echo "SUSFS_NEW_HINT=no" >> "$GITHUB_ENV"
           echo "WIFI_SAFE=yes" >> "$GITHUB_ENV"
           echo "WIFI_BYPASS_BUILD=no" >> "$GITHUB_ENV"
+          echo "KERNEL_EXACT_MATCH=yes" >> "$GITHUB_ENV"
 
       - name: Build AnyKernel3 flashable zip
         run: |
@@ -480,6 +522,7 @@ jobs:
           FINAL_SUSFS="no"
           FINAL_WIFI="no"
           FINAL_BYPASS="no"
+          FINAL_EXACT="${KERNEL_EXACT_MATCH:-no}"
           if strings out/Image 2>/dev/null | grep -Eiq 'susfs|ksu_susfs|sus_su'; then FINAL_SUSFS="yes"; fi
           if strings out/Image 2>/dev/null | grep -Eiq 'cfg80211|mac80211|ath10k|ath11k|mt76|wlan|wcn|ath12k|iwlwifi|brcmfmac'; then FINAL_WIFI="yes"; fi
           if echo "${BEST_URL:-}" | grep -qiE 'bypass'; then FINAL_BYPASS="yes"; fi
@@ -487,6 +530,7 @@ jobs:
           echo "FINAL_SUSFS=$FINAL_SUSFS" >> "$GITHUB_ENV"
           echo "FINAL_WIFI=$FINAL_WIFI" >> "$GITHUB_ENV"
           echo "FINAL_BYPASS=$FINAL_BYPASS" >> "$GITHUB_ENV"
+          echo "FINAL_EXACT=$FINAL_EXACT" >> "$GITHUB_ENV"
 
           if [ "$FINAL_SUSFS" != "yes" ] && [ "${{ inputs.gki_source }}" != "Stock-Boot" ] && [ "${{ inputs.gki_source }}" != "KernelSU-Next" ]; then
             echo "::error::Selected kernel does not expose SUSFS strings"
@@ -498,6 +542,11 @@ jobs:
               echo "::error::Strict WiFi mode enabled but WiFi symbols/Bypass build not detected"
               exit 1
             fi
+          fi
+
+          if [ "$NEED_WIFI_FIX" = "yes" ] && [ "${{ inputs.require_exact_kver }}" = "true" ] && [ "$FINAL_EXACT" != "yes" ]; then
+            echo "::error::Exact KVER match is required for kernel >=6.6 but selected kernel is not exact match"
+            exit 1
           fi
 
           mkdir -p report
@@ -513,9 +562,12 @@ jobs:
             echo "SUSFS (selected): ${SUSFS_KERNEL:-N/A}"
             echo "WiFi safe       : ${WIFI_SAFE:-N/A}"
             echo "Bypass build    : ${WIFI_BYPASS_BUILD:-N/A}"
+            echo "Exact match     : ${KERNEL_EXACT_MATCH:-N/A}"
+            echo "SUSFS newer hint: ${SUSFS_NEW_HINT:-N/A}"
             echo "SUSFS (final)   : $FINAL_SUSFS"
             echo "WiFi (final)    : $FINAL_WIFI"
             echo "Bypass (final)  : $FINAL_BYPASS"
+            echo "Exact (final)   : $FINAL_EXACT"
           } > report/patch_report.txt
           cat report/patch_report.txt
 
@@ -618,9 +670,12 @@ jobs:
           set -e
           mkdir -p modules
 
-          URL=$(curl -sf https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest \
-            | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' \
-            | head -1 || true)
+          URL=$(curl -sf "https://api.github.com/repos/sidex15/ksu_module_susfs/releases?per_page=20" \
+            | jq -r '[.[].assets[] | select(.name | test("susfs|ksu_module_susfs"; "i") and (.name | endswith(".zip")))]
+                     | sort_by(.updated_at // .created_at)
+                     | reverse
+                     | .[0].browser_download_url // empty' \
+            || true)
 
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
             ALL_REL=$(curl -sf "https://api.github.com/repos/zzh20188/GKI_KernelSU_SUSFS/releases?per_page=10")
@@ -639,12 +694,20 @@ jobs:
           fi
 
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            URL="https://github.com/sidex15/ksu_module_susfs/releases/download/v1.5.2/ksu_module_susfs_v1.5.2.zip"
+            URL=$(curl -sf "https://api.github.com/repos/simonpunk/susfs4ksu-module/releases?per_page=10" \
+              | jq -r '[.[].assets[] | select(.name | test("susfs"; "i") and (.name | endswith(".zip")))]
+                       | sort_by(.updated_at // .created_at)
+                       | reverse
+                       | .[0].browser_download_url // empty' \
+              || true)
           fi
+
+          [ -n "$URL" ] && [ "$URL" != "null" ] || { echo "::error::Cannot find a SUSFS module zip from known sources"; exit 1; }
 
           curl -sL "$URL" -o modules/ksu_module_susfs.zip
           [ -s modules/ksu_module_susfs.zip ] || { echo "::error::SUSFS module download failed"; exit 1; }
           echo "SUSFS_MODULE=yes" >> "$GITHUB_ENV"
+          echo "SUSFS_MODULE_URL=$URL" >> "$GITHUB_ENV"
 
       - name: Download ZygiskNext + Shamiko
         if: inputs.include_zygisk == true
@@ -733,12 +796,17 @@ jobs:
             echo "| KMI | \`${KMI:-unknown}\` |"
             echo "| Need WiFi fix (>=6.6) | \`${NEED_WIFI_FIX:-unknown}\` |"
             echo "| WiFi policy | \`${{ inputs.wifi_fix_mode }}\` |"
+            echo "| Require exact KVER | \`${{ inputs.require_exact_kver }}\` |"
             echo "| WiFi bypass build | \`${WIFI_BYPASS_BUILD:-unknown}\` |"
             echo "| WiFi safe (selected) | \`${WIFI_SAFE:-unknown}\` |"
+            echo "| Exact match selected | \`${KERNEL_EXACT_MATCH:-unknown}\` |"
             echo "| SUSFS selected | \`${SUSFS_KERNEL:-unknown}\` |"
+            echo "| SUSFS newer hint | \`${SUSFS_NEW_HINT:-unknown}\` |"
             echo "| SUSFS final | \`${FINAL_SUSFS:-unknown}\` |"
             echo "| WiFi symbols final | \`${FINAL_WIFI:-unknown}\` |"
             echo "| Bypass build final | \`${FINAL_BYPASS:-unknown}\` |"
+            echo "| Exact match final | \`${FINAL_EXACT:-unknown}\` |"
+            echo "| SUSFS module URL | ${SUSFS_MODULE_URL:-N/A} |"
             echo "| Best URL | ${BEST_URL:-N/A} |"
             echo "| Best score | \`${BEST_SCORE:-N/A}\` |"
             if [ "${{ inputs.gki_source }}" = "zzh20188-ReSukiSU" ]; then
@@ -750,7 +818,7 @@ jobs:
             echo "| GoFile SUSFS Module | ${GOFILE_LINK_SUSFS_MODULE:-N/A} |"
             if [ "${NEED_WIFI_FIX:-no}" = "yes" ] && [ "${FINAL_BYPASS:-no}" != "yes" ] && [ "${FINAL_WIFI:-no}" != "yes" ]; then
               echo ""
-              echo "> ⚠️ WiFi warning: kernel >=6.6 and no bypass/WiFi symbols detected."
+              echo "> WiFi warning: kernel >=6.6 and no bypass/WiFi symbols detected."
               echo "> Use wifi_fix_mode=strict or switch source/release."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
