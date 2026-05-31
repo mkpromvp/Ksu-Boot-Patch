@@ -249,16 +249,6 @@ jobs:
             | .browser_download_url
           ' assets.json >> candidates/urls.txt
 
-          jq -r '
-            .[]
-            | select(
-                (.name | ascii_downcase | contains("anykernel3")) and
-                (.name | ascii_downcase | contains("bypass")) and
-                (.name | endswith(".zip"))
-              )
-            | .browser_download_url
-          ' assets.json >> candidates/urls.txt
-
           jq -r --arg kv "$KVER" --arg an "$ANDROID" '
             .[]
             | select(
@@ -281,14 +271,27 @@ jobs:
             | .browser_download_url
           ' assets.json >> candidates/urls.txt
 
-          jq -r '
-            .[]
-            | select((.name | ascii_downcase | contains("anykernel3")) and (.name | endswith(".zip")))
-            | .browser_download_url
-          ' assets.json >> candidates/urls.txt
-
           awk 'NF' candidates/urls.txt | awk '!seen[$0]++' > candidates/urls_clean.txt
           mv candidates/urls_clean.txt candidates/urls.txt
+
+          # If strict filtering returned empty, open controlled fallback.
+          if [ ! -s candidates/urls.txt ]; then
+            echo "No strict candidates, enabling fallback candidates"
+            jq -r --arg an "$ANDROID" '
+              .[]
+              | select(
+                  (.name | ascii_downcase | contains("anykernel3")) and
+                  (.name | ascii_downcase | contains($an)) and
+                  (.name | endswith(".zip"))
+                )
+              | .browser_download_url
+            ' assets.json >> candidates/urls.txt
+          fi
+
+          # Hard cap to avoid scanning hundreds of zips.
+          CANDIDATE_LIMIT=25
+          head -n "$CANDIDATE_LIMIT" candidates/urls.txt > candidates/urls_limited.txt
+          mv candidates/urls_limited.txt candidates/urls.txt
 
           [ -s candidates/urls.txt ] || { echo "::error::No candidate URLs found"; exit 1; }
 
@@ -322,6 +325,20 @@ jobs:
             i=$((i+1))
             [ -n "$URL" ] || continue
 
+            URL_L=$(echo "$URL" | tr '[:upper:]' '[:lower:]')
+
+            # Fast prefilter from filename to avoid downloading obvious mismatches.
+            if [ "${{ inputs.require_exact_kver }}" = "true" ] && [ "$need_wifi" = "yes" ]; then
+              if ! echo "$URL" | grep -q "$KVER"; then
+                echo "skip: url not matching exact KVER ($KVER)"
+                continue
+              fi
+              if [ -n "$ANDROID" ] && ! echo "$URL_L" | grep -q "$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')"; then
+                echo "skip: url not matching android tag ($ANDROID)"
+                continue
+              fi
+            fi
+
             CZIP="candidates/cand_${i}.zip"
             CDIR="candidates/cand_${i}"
             CIMG=""
@@ -331,7 +348,7 @@ jobs:
 
             echo "--- Candidate #$i ---"
             echo "URL: $URL"
-            curl -L --progress-bar "$URL" -o "$CZIP"
+            curl -L --progress-bar --connect-timeout 20 --max-time 240 "$URL" -o "$CZIP"
             [ -s "$CZIP" ] || { echo "empty download, skip"; continue; }
 
             unzip -q "$CZIP" -d "$CDIR" || { echo "unzip failed, skip"; continue; }
@@ -381,7 +398,7 @@ jobs:
               SCORE=$((SCORE+50))
             fi
 
-            if echo "$URL" | grep -qiE 'bypass'; then
+            if echo "$URL_L" | grep -qiE 'bypass'; then
               HAS_BYPASS="yes"
               SCORE=$((SCORE+80))
             fi
@@ -392,15 +409,15 @@ jobs:
               SCORE=$((SCORE+15))
             fi
 
-            if echo "$URL" | grep -Eiq 'wifi|wlan|ath|mt76|cfg80211|mac80211|fix|bypass'; then
+            if echo "$URL_L" | grep -Eiq 'wifi|wlan|ath|mt76|cfg80211|mac80211|fix|bypass'; then
               SCORE=$((SCORE+10))
             fi
 
-            if [ "${{ inputs.gki_source }}" = "zzh20188-ReSukiSU" ] && echo "$URL" | grep -Eiq 'resukisu|sukisu'; then
+            if [ "${{ inputs.gki_source }}" = "zzh20188-ReSukiSU" ] && echo "$URL_L" | grep -Eiq 'resukisu|sukisu'; then
               SCORE=$((SCORE+10))
             fi
 
-            if echo "$URL" | grep -qiE 'exp|experimental'; then
+            if echo "$URL_L" | grep -qiE 'exp|experimental'; then
               SCORE=$((SCORE-15))
             fi
 
@@ -432,6 +449,12 @@ jobs:
               BEST_BYPASS="$HAS_BYPASS"
               BEST_EXACT="$HAS_EXACT"
               BEST_SUSFS_NEW="$HAS_SUSFS_NEW"
+
+              # Early exit for top-quality match to reduce runtime.
+              if [ "$BEST_EXACT" = "yes" ] && [ "$BEST_SUSFS" = "yes" ] && { [ "$BEST_WIFI" = "yes" ] || [ "$BEST_BYPASS" = "yes" ]; } && [ "$BEST_SCORE" -ge 300 ]; then
+                echo "early-stop: high confidence candidate found"
+                break
+              fi
             fi
           done < candidates/urls.txt
 
