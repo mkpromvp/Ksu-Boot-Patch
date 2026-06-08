@@ -182,9 +182,9 @@ jobs:
               echo "SRC_REPO=zzh20188/GKI_KernelSU_SUSFS" >> "$GITHUB_ENV"
               echo "SRC_USE_PRERELEASE=true" >> "$GITHUB_ENV"
               echo "MGR1_REPO=" >> "$GITHUB_ENV"
-              echo "MGR1_NAME=ReSukiSU_Manager_Normal" >> "$GITHUB_ENV"
+              echo "MGR1_NAME=ReSukiSU_Manager" >> "$GITHUB_ENV"
               echo "MGR2_REPO=" >> "$GITHUB_ENV"
-              echo "MGR2_NAME=ReSukiSU_Manager_Spoofed" >> "$GITHUB_ENV"
+              echo "MGR2_NAME=" >> "$GITHUB_ENV"
               ;;
             KernelSU-Next|Stock-Boot)
               echo "SRC_REPO=" >> "$GITHUB_ENV"
@@ -217,6 +217,11 @@ jobs:
           RELEASE_TAG=$(echo "$FILTERED" | jq -r '.[0].tag_name // "unknown"')
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           echo "Selected release family, top tag: $RELEASE_TAG"
+
+          # حفظ تاريخ الـ zzh release عشان نطابق معاه الـ manager version
+          RELEASE_DATE=$(echo "$FILTERED" | jq -r '.[0].created_at // empty')
+          echo "RELEASE_DATE=${RELEASE_DATE:-}" >> "$GITHUB_ENV"
+          echo "zzh release date: ${RELEASE_DATE:-unknown}"
 
           echo "$FILTERED" > releases.json
           jq '[.[].assets[] | {name: .name, browser_download_url: .browser_download_url}]' releases.json > assets.json
@@ -580,6 +585,7 @@ jobs:
             echo "Kernel version  : $KVER"
             echo "KMI             : $KMI"
             echo "Release tag     : ${RELEASE_TAG:-N/A}"
+            echo "Release date    : ${RELEASE_DATE:-N/A}"
             echo "Best URL        : ${BEST_URL:-N/A}"
             echo "Best score      : ${BEST_SCORE:-N/A}"
             echo "SUSFS (selected): ${SUSFS_KERNEL:-N/A}"
@@ -657,31 +663,194 @@ jobs:
           download_apk "$MGR1_REPO" "$MGR1_NAME"
           download_apk "$MGR2_REPO" "$MGR2_NAME"
 
-      - name: Download ReSukiSU Manager APKs
+      # ──────────────────────────────────────────────────────────────────────────
+      # ReSukiSU Manager: بنجيب الـ manager الأقرب لتاريخ الـ zzh kernel build
+      # لأن ReSukiSU مش بتنشر على GitHub Releases خالص.
+      # المنطق:
+      #   1. نجيب كل الـ successful runs لـ build-manager workflow
+      #   2. نقارن تواريخهم بتاريخ الـ zzh prerelease (RELEASE_DATE)
+      #   3. نختار أقرب run قبل أو مع الـ zzh release date
+      #   4. نحمله من nightly.link باستخدام الـ run ID المحدد
+      #   5. fallback لأحدث build لو فشل كل حاجة
+      # ──────────────────────────────────────────────────────────────────────────
+      - name: Download ReSukiSU Manager (version-matched to kernel build)
         if: inputs.gki_source == 'zzh20188-ReSukiSU'
         run: |
           set -e
           mkdir -p managers
 
-          ALL_RELEASES=$(curl -sf "https://api.github.com/repos/zzh20188/GKI_KernelSU_SUSFS/releases?per_page=10")
-          RELEASE_JSON=$(echo "$ALL_RELEASES" | jq 'map(select(.prerelease == true)) | .[0]')
+          echo "=== Fetching ReSukiSU build-manager workflow runs ==="
+          RUNS_JSON=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/ReSukiSU/ReSukiSU/actions/workflows/build-manager.yml/runs?per_page=30&status=success")
 
-          NORMAL_URL=$(echo "$RELEASE_JSON" | jq -r '[.assets[] | select((.name | endswith(".apk")) and (.name | test("ReSukiSU";"i")) and (.name | test("spoofed")|not) and (.name | test("debug")|not) and (.name | test("universal";"i"))) | .browser_download_url] | .[0]' || true)
-          if [ -z "$NORMAL_URL" ] || [ "$NORMAL_URL" = "null" ]; then
-            NORMAL_URL=$(echo "$RELEASE_JSON" | jq -r '[.assets[] | select((.name | endswith(".apk")) and (.name | test("ReSukiSU";"i")) and (.name | test("spoofed")|not) and (.name | test("debug")|not) and (.name | test("arm64";"i"))) | .browser_download_url] | .[0]' || true)
-          fi
-          [ -n "$NORMAL_URL" ] && [ "$NORMAL_URL" != "null" ] && curl -sL "$NORMAL_URL" -o managers/ReSukiSU_Manager_Normal.apk || true
+          TOTAL_RUNS=$(echo "$RUNS_JSON" | jq '.workflow_runs | length // 0')
+          echo "Found $TOTAL_RUNS successful manager runs"
 
-          SPOOFED_URL=$(echo "$RELEASE_JSON" | jq -r '[.assets[] | select((.name | endswith(".apk")) and (.name | test("ReSukiSU";"i")) and (.name | test("spoofed";"i")) and (.name | test("debug")|not) and (.name | test("universal";"i"))) | .browser_download_url] | .[0]' || true)
-          if [ -z "$SPOOFED_URL" ] || [ "$SPOOFED_URL" = "null" ]; then
-            SPOOFED_URL=$(echo "$RELEASE_JSON" | jq -r '[.assets[] | select((.name | endswith(".apk")) and (.name | test("ReSukiSU";"i")) and (.name | test("spoofed";"i")) and (.name | test("debug")|not) and (.name | test("arm64";"i"))) | .browser_download_url] | .[0]' || true)
+          BEST_RUN_ID=""
+          BEST_RUN_DATE=""
+
+          # ── حاول تطابق مع تاريخ الـ zzh release ──
+          if [ -n "$RELEASE_DATE" ] && [ "$RELEASE_DATE" != "null" ]; then
+            echo "Target zzh release date: $RELEASE_DATE"
+
+            # أحدث run مش أحدث من الـ zzh release (أقرب run متوافق)
+            BEST_RUN_ID=$(echo "$RUNS_JSON" | jq -r --arg d "$RELEASE_DATE" '
+              [.workflow_runs[]
+                | select(.created_at <= $d)
+                | {id: (.id | tostring), date: .created_at}
+              ]
+              | sort_by(.date)
+              | reverse
+              | .[0].id // empty
+            ')
+            BEST_RUN_DATE=$(echo "$RUNS_JSON" | jq -r --arg d "$RELEASE_DATE" '
+              [.workflow_runs[]
+                | select(.created_at <= $d)
+                | {id: (.id | tostring), date: .created_at}
+              ]
+              | sort_by(.date)
+              | reverse
+              | .[0].date // empty
+            ')
+
+            echo "Best matched run: id=${BEST_RUN_ID:-none} date=${BEST_RUN_DATE:-none}"
+
+            # لو مفيش run قبل الـ zzh date (zzh قديم جداً)، هات أقدم run متاح
+            if [ -z "$BEST_RUN_ID" ] || [ "$BEST_RUN_ID" = "null" ]; then
+              echo "No run before zzh date — using oldest available run"
+              BEST_RUN_ID=$(echo "$RUNS_JSON" | jq -r '
+                [.workflow_runs[] | {id: (.id | tostring), date: .created_at}]
+                | sort_by(.date)
+                | .[0].id // empty
+              ')
+              BEST_RUN_DATE=$(echo "$RUNS_JSON" | jq -r '
+                [.workflow_runs[] | {id: (.id | tostring), date: .created_at}]
+                | sort_by(.date)
+                | .[0].date // empty
+              ')
+              echo "Oldest run fallback: id=${BEST_RUN_ID:-none} date=${BEST_RUN_DATE:-none}"
+            fi
+          else
+            echo "No RELEASE_DATE available — skipping date-match, will use latest run"
           fi
-          if [ -n "$SPOOFED_URL" ] && [ "$SPOOFED_URL" != "null" ]; then
-            curl -sL "$SPOOFED_URL" -o managers/ReSukiSU_Manager_Spoofed.apk
+
+          # ── fallback نهائي: أحدث run ──
+          if [ -z "$BEST_RUN_ID" ] || [ "$BEST_RUN_ID" = "null" ]; then
+            echo "Falling back to latest successful manager run"
+            BEST_RUN_ID=$(echo "$RUNS_JSON" | jq -r '(.workflow_runs[0].id // empty) | tostring')
+            BEST_RUN_DATE=$(echo "$RUNS_JSON" | jq -r '.workflow_runs[0].created_at // empty')
+            echo "Latest run: id=${BEST_RUN_ID:-none} date=${BEST_RUN_DATE:-none}"
+          fi
+
+          [ -n "$BEST_RUN_ID" ] && [ "$BEST_RUN_ID" != "null" ] || {
+            echo "::error::Cannot determine any valid ReSukiSU manager run ID"
+            exit 1
+          }
+
+          echo "RESUKISU_MANAGER_RUN_ID=$BEST_RUN_ID" >> "$GITHUB_ENV"
+          echo "RESUKISU_MANAGER_RUN_DATE=$BEST_RUN_DATE" >> "$GITHUB_ENV"
+          echo "Selected run ID: $BEST_RUN_ID (built at: ${BEST_RUN_DATE:-unknown})"
+
+          # ── حمل الـ artifact من الـ run المحدد عبر nightly.link ──
+          RUN_URL="https://nightly.link/ReSukiSU/ReSukiSU/actions/runs/${BEST_RUN_ID}/Manager-release.zip"
+          BRANCH_URL="https://nightly.link/ReSukiSU/ReSukiSU/workflows/build-manager/main/Manager-release.zip"
+
+          echo "Trying run-specific URL: $RUN_URL"
+          HTTP_CODE=$(curl -fL --progress-bar --connect-timeout 30 --max-time 180 \
+            -w "%{http_code}" -o managers/resukisu_nightly.zip "$RUN_URL" 2>/dev/null || echo "000")
+
+          if [ "$HTTP_CODE" != "200" ] || [ ! -s managers/resukisu_nightly.zip ]; then
+            echo "::warning::Run-specific download failed (HTTP $HTTP_CODE) — falling back to latest branch build"
+            rm -f managers/resukisu_nightly.zip
+            curl -fL --progress-bar --connect-timeout 30 --max-time 180 \
+              "$BRANCH_URL" -o managers/resukisu_nightly.zip || {
+              echo "::error::Both run-specific and branch fallback downloads failed"
+              exit 1
+            }
+          fi
+
+          [ -s managers/resukisu_nightly.zip ] || {
+            echo "::error::ReSukiSU manager download produced empty file"
+            exit 1
+          }
+
+          echo "=== Nightly artifact contents ==="
+          unzip -l managers/resukisu_nightly.zip || true
+
+          unzip -o managers/resukisu_nightly.zip -d managers/resukisu_extracted/ || {
+            echo "::error::Failed to unzip manager artifact"
+            exit 1
+          }
+
+          # ── فصل normal و spoofed APKs واختيار الأفضل ──
+          NORMAL_APK=""
+          SPOOFED_APK=""
+
+          while IFS= read -r apk; do
+            apk_lower=$(echo "$apk" | tr '[:upper:]' '[:lower:]')
+
+            # تجاهل debug builds
+            if echo "$apk_lower" | grep -qiE 'debug'; then
+              echo "skip debug: $apk"
+              continue
+            fi
+
+            if echo "$apk_lower" | grep -qiE 'spoof|fake'; then
+              # Spoofed variant: فضل arm64 أو universal
+              if [ -z "$SPOOFED_APK" ]; then
+                SPOOFED_APK="$apk"
+              elif echo "$apk_lower" | grep -qiE 'arm64|universal|release'; then
+                SPOOFED_APK="$apk"
+              fi
+              echo "Found spoofed APK: $apk"
+            else
+              # Normal variant: فضل arm64 أو universal أو release
+              if [ -z "$NORMAL_APK" ]; then
+                NORMAL_APK="$apk"
+              elif echo "$apk_lower" | grep -qiE 'arm64|universal|release'; then
+                NORMAL_APK="$apk"
+              fi
+              echo "Found normal APK: $apk"
+            fi
+          done < <(find managers/resukisu_extracted/ -name "*.apk" | sort)
+
+          # حفظ الـ normal APK
+          if [ -n "$NORMAL_APK" ]; then
+            cp "$NORMAL_APK" managers/ReSukiSU_Manager.apk
+            APK_SIZE=$(stat -c%s managers/ReSukiSU_Manager.apk)
+            echo "Saved: managers/ReSukiSU_Manager.apk ($APK_SIZE bytes)"
+            echo "RESUKISU_MANAGER_FOUND=yes" >> "$GITHUB_ENV"
+          else
+            # آخر فرصة: أي APK مش debug
+            FALLBACK=$(find managers/resukisu_extracted/ -name "*.apk" \
+              | grep -viE 'debug' | head -1 || true)
+            if [ -n "$FALLBACK" ]; then
+              cp "$FALLBACK" managers/ReSukiSU_Manager.apk
+              echo "Saved (last-resort fallback): managers/ReSukiSU_Manager.apk"
+              echo "RESUKISU_MANAGER_FOUND=yes" >> "$GITHUB_ENV"
+            else
+              echo "::error::No usable APK found in nightly artifact"
+              exit 1
+            fi
+          fi
+
+          # حفظ الـ spoofed APK لو موجود
+          if [ -n "$SPOOFED_APK" ]; then
+            cp "$SPOOFED_APK" managers/ReSukiSU_Manager_Spoofed.apk
+            echo "Saved: managers/ReSukiSU_Manager_Spoofed.apk"
             echo "RESUKISU_SPOOFED_FOUND=yes" >> "$GITHUB_ENV"
           else
             echo "RESUKISU_SPOOFED_FOUND=no" >> "$GITHUB_ENV"
+            echo "::notice::No spoofed variant in this build"
           fi
+
+          echo "=== Final managers/ ==="
+          ls -lh managers/*.apk 2>/dev/null || echo "(no APKs)"
+
+          # تنظيف
+          rm -rf managers/resukisu_extracted/ managers/resukisu_nightly.zip
 
       - name: Download SUSFS module
         if: >
@@ -924,6 +1093,10 @@ jobs:
             echo "| Best URL | ${BEST_URL:-N/A} |"
             echo "| Best score | \`${BEST_SCORE:-N/A}\` |"
             if [ "${{ inputs.gki_source }}" = "zzh20188-ReSukiSU" ]; then
+              echo "| ReSukiSU zzh release date | \`${RELEASE_DATE:-N/A}\` |"
+              echo "| ReSukiSU manager run ID | \`${RESUKISU_MANAGER_RUN_ID:-N/A}\` |"
+              echo "| ReSukiSU manager run date | \`${RESUKISU_MANAGER_RUN_DATE:-N/A}\` |"
+              echo "| ReSukiSU Manager found | \`${RESUKISU_MANAGER_FOUND:-N/A}\` |"
               echo "| ReSukiSU Spoofed APK found | \`${RESUKISU_SPOOFED_FOUND:-N/A}\` |"
             fi
             echo "| GoFile BOOT | ${GOFILE_LINK_BOOT:-N/A} |"
