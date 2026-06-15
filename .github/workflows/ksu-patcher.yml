@@ -185,32 +185,80 @@ jobs:
           inputs.gki_source == 'WildKernels' ||
           inputs.gki_source == 'zzh20188' ||
           inputs.gki_source == 'zzh20188-ReSukiSU'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           REPO="$SRC_REPO"
           USE_PRE="$SRC_USE_PRERELEASE"
 
-          github_api_get() {
+          github_api_get_json_array() {
             local url="$1"
-            if [ -n "${GITHUB_TOKEN:-}" ]; then
-              curl -sSL --retry 4 --retry-all-errors --connect-timeout 20 --max-time 120 \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                "$url"
-            else
-              curl -sSL --retry 4 --retry-all-errors --connect-timeout 20 --max-time 120 \
-                -H "Accept: application/vnd.github+json" \
-                "$url"
+            local attempt
+            local body
+            for attempt in 1 2 3 4 5; do
+              if [ -n "${GITHUB_TOKEN:-}" ]; then
+                body=$(curl -sSL --retry 2 --retry-all-errors --connect-timeout 20 --max-time 120 \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                  "$url" || true)
+              else
+                body=$(curl -sSL --retry 2 --retry-all-errors --connect-timeout 20 --max-time 120 \
+                  -H "Accept: application/vnd.github+json" \
+                  "$url" || true)
+              fi
+
+              if echo "$body" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                echo "$body"
+                return 0
+              fi
+
+              echo "warn: non-json/invalid API response on attempt $attempt for $url"
+              sleep $((attempt * 2))
+            done
+            return 1
+          }
+
+          collect_release_urls_from_html() {
+            local page
+            local html
+            local found=0
+            : > candidates/urls_html_raw.txt
+
+            for page in 1 2 3 4 5; do
+              html=$(curl -sSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 \
+                "https://github.com/${REPO}/releases?page=${page}" || true)
+              [ -n "${html:-}" ] || continue
+
+              echo "$html" \
+                | tr '"' '\n' \
+                | grep "/${REPO}/releases/download/" \
+                | grep -Ei '\.zip($|\?)' \
+                | awk '{print "https://github.com" $0}' >> candidates/urls_html_raw.txt || true
+            done
+
+            if [ -s candidates/urls_html_raw.txt ]; then
+              awk 'NF' candidates/urls_html_raw.txt \
+                | sed 's/amp;//g' \
+                | grep -Ei 'anykernel3.*\.zip|\.zip.*anykernel3' \
+                | awk '!seen[$0]++' > candidates/urls.txt || true
+              [ -s candidates/urls.txt ] && found=1
             fi
+
+            [ "$found" -eq 1 ]
           }
 
           rm -f releases_all.json
           touch releases_all.json
 
+          API_OK="yes"
           for PAGE in 1 2 3; do
-            RESP=$(github_api_get "https://api.github.com/repos/${REPO}/releases?per_page=100&page=${PAGE}")
-            echo "$RESP" | jq -e 'type == "array"' >/dev/null || { echo "::error::GitHub API error while fetching releases for $REPO"; echo "$RESP"; exit 1; }
+            RESP=$(github_api_get_json_array "https://api.github.com/repos/${REPO}/releases?per_page=100&page=${PAGE}" || true)
+            if [ -z "${RESP:-}" ]; then
+              API_OK="no"
+              break
+            fi
             COUNT=$(echo "$RESP" | jq 'length')
             [ "$COUNT" -gt 0 ] || break
             if [ ! -s releases_all.json ] || [ "$(cat releases_all.json)" = "" ]; then
@@ -221,59 +269,69 @@ jobs:
             fi
           done
 
-          [ -s releases_all.json ] || { echo "::error::No releases payload received"; exit 1; }
+          if [ "$API_OK" = "yes" ] && [ -s releases_all.json ]; then
+            if [ "$USE_PRE" = "true" ]; then
+              jq 'map(select(.prerelease == true))' releases_all.json > releases_filtered.json
+            else
+              jq 'map(select(.prerelease == false))' releases_all.json > releases_filtered.json
+            fi
 
-          if [ "$USE_PRE" = "true" ]; then
-            jq 'map(select(.prerelease == true))' releases_all.json > releases_filtered.json
-          else
-            jq 'map(select(.prerelease == false))' releases_all.json > releases_filtered.json
+            if [ "$(jq 'length' releases_filtered.json)" -gt 0 ]; then
+              jq '
+                [ .[]
+                  | . as $rel
+                  | ($rel.assets // [])[]?
+                  | select(.name and .browser_download_url)
+                  | {
+                      name: .name,
+                      url: .browser_download_url,
+                      release_tag: ($rel.tag_name // "unknown"),
+                      published_at: ($rel.published_at // $rel.created_at // "1970-01-01T00:00:00Z")
+                    }
+                ]
+                | map(select((.name | ascii_downcase | contains("anykernel3")) and (.name | endswith(".zip"))))
+              ' releases_filtered.json > candidates/assets_meta.json
+            else
+              echo '[]' > candidates/assets_meta.json
+            fi
+
+            if [ "$(jq 'length' candidates/assets_meta.json)" -gt 0 ]; then
+              jq --arg kv "$KVER" --arg ks "$KSHORT" --arg an "$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')" '
+                map(
+                  . + {
+                    lname: (.name | ascii_downcase),
+                    rank: (
+                      (if ($kv != "" and $kv != "unknown" and (.name | contains($kv))) then 320 else 0 end)
+                      + (if ($ks != "" and $ks != "unknown" and (.name | contains($ks))) then 130 else 0 end)
+                      + (if ($an != "" and $an != "unknown" and (.name | ascii_downcase | contains($an))) then 120 else 0 end)
+                      + (if (.name | ascii_downcase | contains("gki")) then 40 else 0 end)
+                      + (if (.name | ascii_downcase | contains("bypass")) then 15 else 0 end)
+                    ),
+                    date_score: ((.published_at | fromdateiso8601?) // 0)
+                  }
+                )
+                | sort_by([.rank, .date_score])
+                | reverse
+                | .[0:60]
+              ' candidates/assets_meta.json > candidates/assets_ranked.json
+
+              jq -r '.[].url' candidates/assets_ranked.json | awk 'NF' | awk '!seen[$0]++' > candidates/urls.txt
+
+              RELEASE_TAG=$(jq -r '.[0].release_tag // "unknown"' candidates/assets_ranked.json)
+              echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+              echo "MATCH_MODE=universal-gki-api" >> "$GITHUB_ENV"
+            fi
           fi
 
-          [ "$(jq 'length' releases_filtered.json)" -gt 0 ] || { echo "::error::No releases found after prerelease filter"; exit 1; }
+          if [ ! -s candidates/urls.txt ]; then
+            echo "warn: API path unavailable, trying HTML fallback..."
+            if collect_release_urls_from_html; then
+              echo "RELEASE_TAG=unknown" >> "$GITHUB_ENV"
+              echo "MATCH_MODE=html-fallback" >> "$GITHUB_ENV"
+            fi
+          fi
 
-          jq '
-            [ .[]
-              | . as $rel
-              | ($rel.assets // [])[]?
-              | select(.name and .browser_download_url)
-              | {
-                  name: .name,
-                  url: .browser_download_url,
-                  release_tag: ($rel.tag_name // "unknown"),
-                  published_at: ($rel.published_at // $rel.created_at // "1970-01-01T00:00:00Z")
-                }
-            ]
-            | map(select((.name | ascii_downcase | contains("anykernel3")) and (.name | endswith(".zip"))))
-          ' releases_filtered.json > candidates/assets_meta.json
-
-          [ "$(jq 'length' candidates/assets_meta.json)" -gt 0 ] || { echo "::error::No AnyKernel3 assets found"; exit 1; }
-
-          jq --arg kv "$KVER" --arg ks "$KSHORT" --arg an "$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')" '
-            map(
-              . + {
-                lname: (.name | ascii_downcase),
-                rank: (
-                  (if ($kv != "" and $kv != "unknown" and (.name | contains($kv))) then 320 else 0 end)
-                  + (if ($ks != "" and $ks != "unknown" and (.name | contains($ks))) then 130 else 0 end)
-                  + (if ($an != "" and $an != "unknown" and (.name | ascii_downcase | contains($an))) then 120 else 0 end)
-                  + (if (.name | ascii_downcase | contains("gki")) then 40 else 0 end)
-                  + (if (.name | ascii_downcase | contains("bypass")) then 15 else 0 end)
-                ),
-                date_score: ((.published_at | fromdateiso8601?) // 0)
-              }
-            )
-            | sort_by([.rank, .date_score])
-            | reverse
-            | .[0:60]
-          ' candidates/assets_meta.json > candidates/assets_ranked.json
-
-          jq -r '.[].url' candidates/assets_ranked.json | awk 'NF' | awk '!seen[$0]++' > candidates/urls.txt
-
-          [ -s candidates/urls.txt ] || { echo "::error::No candidate URLs prepared"; exit 1; }
-
-          RELEASE_TAG=$(jq -r '.[0].release_tag // "unknown"' candidates/assets_ranked.json)
-          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
-          echo "MATCH_MODE=universal-gki" >> "$GITHUB_ENV"
+          [ -s candidates/urls.txt ] || { echo "::error::No candidate URLs prepared from API or HTML fallback"; exit 1; }
 
           echo "=== Top candidate URLs (ordered) ==="
           nl -ba candidates/urls.txt
