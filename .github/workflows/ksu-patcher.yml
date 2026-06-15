@@ -185,29 +185,53 @@ jobs:
           inputs.gki_source == 'WildKernels' ||
           inputs.gki_source == 'zzh20188' ||
           inputs.gki_source == 'zzh20188-ReSukiSU'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           REPO="$SRC_REPO"
           USE_PRE="$SRC_USE_PRERELEASE"
 
+          fetch_url() {
+            local url="$1"
+            local body=""
+
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              body=$(curl --http1.1 -sSL --retry 2 --retry-all-errors --connect-timeout 20 --max-time 120 \
+                -H "Accept: application/vnd.github+json" \
+                -H "User-Agent: ksu-boot-patcher" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                "$url" || true)
+            else
+              body=$(curl --http1.1 -sSL --retry 2 --retry-all-errors --connect-timeout 20 --max-time 120 \
+                -H "Accept: application/vnd.github+json" \
+                -H "User-Agent: ksu-boot-patcher" \
+                "$url" || true)
+            fi
+
+            if [ -z "${body:-}" ]; then
+              if [ -n "${GITHUB_TOKEN:-}" ]; then
+                body=$(wget -qO- --timeout=120 --tries=2 \
+                  --header="Accept: application/vnd.github+json" \
+                  --header="User-Agent: ksu-boot-patcher" \
+                  --header="Authorization: Bearer ${GITHUB_TOKEN}" \
+                  "$url" || true)
+              else
+                body=$(wget -qO- --timeout=120 --tries=2 \
+                  --header="Accept: application/vnd.github+json" \
+                  --header="User-Agent: ksu-boot-patcher" \
+                  "$url" || true)
+              fi
+            fi
+
+            echo "$body"
+          }
+
           github_api_get_json_array() {
             local url="$1"
             local attempt
             local body
             for attempt in 1 2 3 4 5; do
-              if [ -n "${GITHUB_TOKEN:-}" ]; then
-                body=$(curl -sSL --retry 2 --retry-all-errors --connect-timeout 20 --max-time 120 \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                  "$url" || true)
-              else
-                body=$(curl -sSL --retry 2 --retry-all-errors --connect-timeout 20 --max-time 120 \
-                  -H "Accept: application/vnd.github+json" \
-                  "$url" || true)
-              fi
+              body=$(fetch_url "$url")
 
               if echo "$body" | jq -e 'type == "array"' >/dev/null 2>&1; then
                 echo "$body"
@@ -227,8 +251,14 @@ jobs:
             : > candidates/urls_html_raw.txt
 
             for page in 1 2 3 4 5; do
-              html=$(curl -sSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 \
+              html=$(curl --http1.1 -sSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 \
+                -H "User-Agent: ksu-boot-patcher" \
                 "https://github.com/${REPO}/releases?page=${page}" || true)
+              if [ -z "${html:-}" ]; then
+                html=$(wget -qO- --timeout=120 --tries=2 \
+                  --header="User-Agent: ksu-boot-patcher" \
+                  "https://github.com/${REPO}/releases?page=${page}" || true)
+              fi
               [ -n "${html:-}" ] || continue
 
               echo "$html" \
