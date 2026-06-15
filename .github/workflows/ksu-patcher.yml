@@ -363,6 +363,62 @@ jobs:
 
           [ -s candidates/urls.txt ] || { echo "::error::No candidate URLs prepared from API or HTML fallback"; exit 1; }
 
+          # Final normalize/rank pass for both API and HTML results.
+          awk 'NF' candidates/urls.txt | awk '!seen[$0]++' > candidates/urls_dedup.txt
+          mv candidates/urls_dedup.txt candidates/urls.txt
+
+          : > candidates/urls_scored.txt
+          while IFS= read -r U; do
+            [ -n "${U:-}" ] || continue
+            UL=$(echo "$U" | tr '[:upper:]' '[:lower:]')
+            SCORE=0
+
+            if [ -n "${KVER:-}" ] && [ "$KVER" != "unknown" ] && echo "$U" | grep -q "$KVER"; then
+              SCORE=$((SCORE + 320))
+            fi
+            if [ -n "${KSHORT:-}" ] && [ "$KSHORT" != "unknown" ] && echo "$U" | grep -q "$KSHORT"; then
+              SCORE=$((SCORE + 130))
+            fi
+            if [ -n "${ANDROID:-}" ] && [ "$ANDROID" != "unknown" ] && echo "$UL" | grep -q "$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')"; then
+              SCORE=$((SCORE + 120))
+            fi
+            if echo "$UL" | grep -q 'gki'; then
+              SCORE=$((SCORE + 40))
+            fi
+            if echo "$UL" | grep -q 'bypass'; then
+              SCORE=$((SCORE + 15))
+            fi
+
+            REL_NUM=$(echo "$UL" | grep -oE '/r[0-9]+' | sed 's#/r##' | head -1)
+            [ -n "${REL_NUM:-}" ] || REL_NUM=0
+            printf "%07d|%05d|%s\n" "$SCORE" "$REL_NUM" "$U" >> candidates/urls_scored.txt
+          done < candidates/urls.txt
+
+          sort -t'|' -k1,1nr -k2,2nr candidates/urls_scored.txt | cut -d'|' -f3- > candidates/urls_sorted.txt
+          mv candidates/urls_sorted.txt candidates/urls.txt
+
+          # If exact match is required, prefer exact filename matches first.
+          if [ "${{ inputs.require_exact_kver }}" = "true" ] && [ -n "${KVER:-}" ] && [ "$KVER" != "unknown" ]; then
+            awk -v kv="$KVER" -v an="$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')" '
+              BEGIN { IGNORECASE=1 }
+              {
+                line=$0
+                low=tolower(line)
+                if (index(line, kv) > 0) {
+                  if (an == "" || an == "unknown" || index(low, an) > 0) print line
+                }
+              }
+            ' candidates/urls.txt > candidates/urls_exact.txt
+
+            if [ -s candidates/urls_exact.txt ]; then
+              mv candidates/urls_exact.txt candidates/urls.txt
+              echo "MATCH_MODE=${MATCH_MODE:-unknown}+exact-name" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          head -n 80 candidates/urls.txt > candidates/urls_limited.txt
+          mv candidates/urls_limited.txt candidates/urls.txt
+
           echo "=== Top candidate URLs (ordered) ==="
           nl -ba candidates/urls.txt
 
@@ -419,6 +475,7 @@ jobs:
             HAS_SUSFS="no"
             HAS_BYPASS="no"
             HAS_EXACT="no"
+            HAS_NAME_EXACT="no"
             HAS_SUSFS_NEW="no"
 
             CKFULL=$(strings "$OUTK" 2>/dev/null | grep -oP 'Linux version \K[^\s]+' | head -1 || true)
@@ -429,6 +486,13 @@ jobs:
               SCORE=$((SCORE + 120))
             elif [ -n "${CKVER:-}" ] && [ -n "${CANDROID:-}" ] && [ "$CANDROID" = "$ANDROID" ] && echo "$CKVER" | grep -q "^${KSHORT}"; then
               SCORE=$((SCORE + 45))
+            fi
+
+            if [ -n "${KVER:-}" ] && [ "$KVER" != "unknown" ] && echo "$URL" | grep -q "$KVER"; then
+              if [ -z "${ANDROID:-}" ] || [ "$ANDROID" = "unknown" ] || echo "$URL_L" | grep -q "$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')"; then
+                HAS_NAME_EXACT="yes"
+                SCORE=$((SCORE + 35))
+              fi
             fi
 
             if strings "$OUTK" 2>/dev/null | grep -Eiq 'susfs|ksu_susfs|sus_su'; then
@@ -460,7 +524,7 @@ jobs:
               SCORE=$((SCORE - 15))
             fi
 
-            echo "score=$SCORE susfs=$HAS_SUSFS susfs_new=$HAS_SUSFS_NEW bypass=$HAS_BYPASS exact=$HAS_EXACT ckver=${CKVER:-unknown}"
+            echo "score=$SCORE susfs=$HAS_SUSFS susfs_new=$HAS_SUSFS_NEW bypass=$HAS_BYPASS exact=$HAS_EXACT name_exact=$HAS_NAME_EXACT ckver=${CKVER:-unknown}"
 
             if [ "$HAS_SUSFS" != "yes" ]; then
               echo "skip: SUSFS missing"
@@ -468,7 +532,14 @@ jobs:
             fi
 
             if [ "${{ inputs.require_exact_kver }}" = "true" ] && [ "$HAS_EXACT" != "yes" ]; then
-              echo "skip: require_exact_kver=true and candidate is not exact ($CKVER/$CANDROID vs $KVER/$ANDROID)"
+              if [ "$HAS_NAME_EXACT" != "yes" ]; then
+                echo "skip: require_exact_kver=true and candidate is not exact ($CKVER/$CANDROID vs $KVER/$ANDROID)"
+                continue
+              fi
+              echo "warn: kernel strings missing exact version, accepting filename-exact candidate"
+            fi
+
+            if [ "${{ inputs.require_exact_kver }}" = "true" ] && [ "$HAS_EXACT" != "yes" ] && [ "$HAS_NAME_EXACT" != "yes" ]; then
               continue
             fi
 
