@@ -238,7 +238,7 @@ jobs:
                 return 0
               fi
 
-              echo "warn: non-json/invalid API response on attempt $attempt for $url"
+              echo "warn: non-json/invalid API response on attempt $attempt for $url" >&2
               sleep $((attempt * 2))
             done
             return 1
@@ -284,11 +284,11 @@ jobs:
 
           API_OK="yes"
           for PAGE in 1 2 3; do
-            RESP=$(github_api_get_json_array "https://api.github.com/repos/${REPO}/releases?per_page=100&page=${PAGE}" || true)
-            if [ -z "${RESP:-}" ]; then
+            if ! RESP=$(github_api_get_json_array "https://api.github.com/repos/${REPO}/releases?per_page=100&page=${PAGE}"); then
               API_OK="no"
               break
             fi
+            [ -n "${RESP:-}" ] || { API_OK="no"; break; }
             COUNT=$(echo "$RESP" | jq 'length')
             [ "$COUNT" -gt 0 ] || break
             if [ ! -s releases_all.json ] || [ "$(cat releases_all.json)" = "" ]; then
@@ -299,7 +299,7 @@ jobs:
             fi
           done
 
-          if [ "$API_OK" = "yes" ] && [ -s releases_all.json ]; then
+          if [ "$API_OK" = "yes" ] && [ -s releases_all.json ] && jq -e 'type == "array"' releases_all.json >/dev/null 2>&1; then
             if [ "$USE_PRE" = "true" ]; then
               jq 'map(select(.prerelease == true))' releases_all.json > releases_filtered.json
             else
