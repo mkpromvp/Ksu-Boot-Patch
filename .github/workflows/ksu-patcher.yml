@@ -248,18 +248,35 @@ jobs:
             local page
             local html
             local found=0
+            local tag
             : > candidates/urls_html_raw.txt
+            : > candidates/release_tags.txt
+
+            fetch_html_page() {
+              local u="$1"
+              local out
+              out=$(curl --http1.1 -sSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 \
+                -H "User-Agent: ksu-boot-patcher" \
+                "$u" || true)
+              if [ -z "${out:-}" ]; then
+                out=$(wget -qO- --timeout=120 --tries=2 \
+                  --header="User-Agent: ksu-boot-patcher" \
+                  "$u" || true)
+              fi
+              echo "$out"
+            }
 
             for page in 1 2 3 4 5; do
-              html=$(curl --http1.1 -sSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 \
-                -H "User-Agent: ksu-boot-patcher" \
-                "https://github.com/${REPO}/releases?page=${page}" || true)
-              if [ -z "${html:-}" ]; then
-                html=$(wget -qO- --timeout=120 --tries=2 \
-                  --header="User-Agent: ksu-boot-patcher" \
-                  "https://github.com/${REPO}/releases?page=${page}" || true)
-              fi
+              html=$(fetch_html_page "https://github.com/${REPO}/releases?page=${page}")
               [ -n "${html:-}" ] || continue
+
+              # Collect release tags then query expanded_assets for full asset list per tag.
+              echo "$html" \
+                | tr '"' '\n' \
+                | grep -E "^/${REPO}/releases/tag/" \
+                | sed -E "s#^/${REPO}/releases/tag/##" \
+                | sed -E 's#[?#].*$##' \
+                | awk 'NF' >> candidates/release_tags.txt || true
 
               echo "$html" \
                 | tr '"' '\n' \
@@ -267,6 +284,21 @@ jobs:
                 | grep -Ei '\.zip($|\?)' \
                 | awk '{print "https://github.com" $0}' >> candidates/urls_html_raw.txt || true
             done
+
+            if [ -s candidates/release_tags.txt ]; then
+              awk '!seen[$0]++' candidates/release_tags.txt > candidates/release_tags_unique.txt
+              while IFS= read -r tag; do
+                [ -n "${tag:-}" ] || continue
+                html=$(fetch_html_page "https://github.com/${REPO}/releases/expanded_assets/${tag}")
+                [ -n "${html:-}" ] || continue
+
+                echo "$html" \
+                  | tr '"' '\n' \
+                  | grep "/${REPO}/releases/download/" \
+                  | grep -Ei '\.zip($|\?)' \
+                  | awk '{print "https://github.com" $0}' >> candidates/urls_html_raw.txt || true
+              done < candidates/release_tags_unique.txt
+            fi
 
             if [ -s candidates/urls_html_raw.txt ]; then
               awk 'NF' candidates/urls_html_raw.txt \
@@ -314,6 +346,7 @@ jobs:
                 RID=$(echo "$REL" | jq -r '.id // empty')
                 RTAG=$(echo "$REL" | jq -r '.tag // "unknown"')
                 RPUB=$(echo "$REL" | jq -r '.published // "1970-01-01T00:00:00Z"')
+                RIDX=$(echo "$REL" | jq -r '.idx // 9999')
                 [ -n "${RID:-}" ] || continue
 
                 for APAGE in 1 2 3 4; do
@@ -322,18 +355,22 @@ jobs:
                   ACNT=$(echo "$AJSON" | jq 'length')
                   [ "$ACNT" -gt 0 ] || break
 
-                  echo "$AJSON" | jq -c --arg tag "$RTAG" --arg pub "$RPUB" '
+                  echo "$AJSON" | jq -c --arg tag "$RTAG" --arg pub "$RPUB" --argjson ridx "$RIDX" '
                     .[]
                     | select(.name and .browser_download_url)
                     | {
                         name: .name,
                         url: .browser_download_url,
                         release_tag: $tag,
-                        published_at: $pub
+                        published_at: $pub,
+                        rel_idx: $ridx
                       }
                   ' >> candidates/assets_meta.ndjson
                 done
-              done < <(jq -rc '.[] | {id: .id, tag: (.tag_name // "unknown"), published: (.published_at // .created_at // "1970-01-01T00:00:00Z")}' releases_filtered.json)
+              done < <(jq -rc 'to_entries[] | {idx: .key, id: .value.id, tag: (.value.tag_name // "unknown"), published: (.value.published_at // .value.created_at // "1970-01-01T00:00:00Z")}' releases_filtered.json)
+
+              LATEST_TAG=$(jq -r '.[0].tag_name // empty' releases_filtered.json)
+              [ -n "${LATEST_TAG:-}" ] && echo "LATEST_TAG=$LATEST_TAG" >> "$GITHUB_ENV"
 
               if [ -s candidates/assets_meta.ndjson ]; then
                 jq -s '
@@ -352,7 +389,9 @@ jobs:
                   . + {
                     lname: (.name | ascii_downcase),
                     rank: (
-                      (if ($kv != "" and $kv != "unknown" and (.name | contains($kv))) then 320 else 0 end)
+                      (if ((.rel_idx // 9999) == 0) then 2500 else 0 end)
+                      + (if ((.rel_idx // 9999) <= 2) then 300 else 0 end)
+                      + (if ($kv != "" and $kv != "unknown" and (.name | contains($kv))) then 320 else 0 end)
                       + (if ($ks != "" and $ks != "unknown" and (.name | contains($ks))) then 130 else 0 end)
                       + (if ($an != "" and $an != "unknown" and (.name | ascii_downcase | contains($an))) then 120 else 0 end)
                       + (if (.name | ascii_downcase | contains("gki")) then 40 else 0 end)
@@ -379,6 +418,10 @@ jobs:
             if collect_release_urls_from_html; then
               echo "RELEASE_TAG=unknown" >> "$GITHUB_ENV"
               echo "MATCH_MODE=html-fallback" >> "$GITHUB_ENV"
+              if [ -s candidates/release_tags_unique.txt ]; then
+                LATEST_TAG=$(head -n 1 candidates/release_tags_unique.txt)
+                [ -n "${LATEST_TAG:-}" ] && echo "LATEST_TAG=$LATEST_TAG" >> "$GITHUB_ENV"
+              fi
             fi
           fi
 
@@ -408,6 +451,9 @@ jobs:
             fi
             if echo "$UL" | grep -q 'bypass'; then
               SCORE=$((SCORE + 15))
+            fi
+            if [ -n "${LATEST_TAG:-}" ] && echo "$UL" | grep -q "/releases/download/${LATEST_TAG}/"; then
+              SCORE=$((SCORE + 2500))
             fi
 
             REL_NUM=$(echo "$UL" | grep -oE '/r[0-9]+' | sed 's#/r##' | head -1 || true)
