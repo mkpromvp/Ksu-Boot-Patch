@@ -436,6 +436,7 @@ jobs:
             [ -n "${U:-}" ] || continue
             UL=$(echo "$U" | tr '[:upper:]' '[:lower:]')
             SCORE=0
+            TAG_SCORE=0
 
             if [ -n "${KVER:-}" ] && [ "$KVER" != "unknown" ] && echo "$U" | grep -q "$KVER"; then
               SCORE=$((SCORE + 320))
@@ -456,9 +457,22 @@ jobs:
               SCORE=$((SCORE + 2500))
             fi
 
-            REL_NUM=$(echo "$UL" | grep -oE '/r[0-9]+' | sed 's#/r##' | head -1 || true)
-            [ -n "${REL_NUM:-}" ] || REL_NUM=0
-            printf "%07d|%05d|%s\n" "$SCORE" "$REL_NUM" "$U" >> candidates/urls_scored.txt
+            TAG_PART=$(echo "$U" | sed -n 's#.*releases/download/\([^/]*\)/.*#\1#p')
+            if echo "$TAG_PART" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+$'; then
+              TVMAJ=$(echo "$TAG_PART" | sed -E 's/^v([0-9]+)\..*/\1/')
+              TVMIN=$(echo "$TAG_PART" | sed -E 's/^v[0-9]+\.([0-9]+)\..*/\1/')
+              TVPAT=$(echo "$TAG_PART" | sed -E 's/^v[0-9]+\.[0-9]+\.([0-9]+)-r[0-9]+$/\1/')
+              TVREL=$(echo "$TAG_PART" | sed -E 's/^v[0-9]+\.[0-9]+\.[0-9]+-r([0-9]+)$/\1/')
+              TAG_SCORE=$((10#$TVMAJ * 1000000000 + 10#$TVMIN * 1000000 + 10#$TVPAT * 1000 + 10#$TVREL))
+            elif echo "$TAG_PART" | grep -Eq '^r[0-9]+$'; then
+              TVREL=$(echo "$TAG_PART" | sed -E 's/^r([0-9]+)$/\1/')
+              TAG_SCORE=$((10#$TVREL))
+            elif echo "$TAG_PART" | grep -Eq '.*-r[0-9]+$'; then
+              TVREL=$(echo "$TAG_PART" | sed -E 's/.*-r([0-9]+)$/\1/')
+              TAG_SCORE=$((10#$TVREL))
+            fi
+
+            printf "%07d|%015d|%s\n" "$SCORE" "$TAG_SCORE" "$U" >> candidates/urls_scored.txt
           done < candidates/urls.txt
 
           sort -t'|' -k1,1nr -k2,2nr candidates/urls_scored.txt | cut -d'|' -f3- > candidates/urls_sorted.txt
