@@ -389,7 +389,7 @@ jobs:
               SCORE=$((SCORE + 15))
             fi
 
-            REL_NUM=$(echo "$UL" | grep -oE '/r[0-9]+' | sed 's#/r##' | head -1)
+            REL_NUM=$(echo "$UL" | grep -oE '/r[0-9]+' | sed 's#/r##' | head -1 || true)
             [ -n "${REL_NUM:-}" ] || REL_NUM=0
             printf "%07d|%05d|%s\n" "$SCORE" "$REL_NUM" "$U" >> candidates/urls_scored.txt
           done < candidates/urls.txt
