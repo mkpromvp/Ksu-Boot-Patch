@@ -307,20 +307,41 @@ jobs:
             fi
 
             if [ "$(jq 'length' releases_filtered.json)" -gt 0 ]; then
-              jq '
-                [ .[]
-                  | . as $rel
-                  | ($rel.assets // [])[]?
-                  | select(.name and .browser_download_url)
-                  | {
-                      name: .name,
-                      url: .browser_download_url,
-                      release_tag: ($rel.tag_name // "unknown"),
-                      published_at: ($rel.published_at // $rel.created_at // "1970-01-01T00:00:00Z")
-                    }
-                ]
-                | map(select((.name | ascii_downcase | contains("anykernel3")) and (.name | endswith(".zip"))))
-              ' releases_filtered.json > candidates/assets_meta.json
+              : > candidates/assets_meta.ndjson
+
+              while IFS= read -r REL; do
+                [ -n "${REL:-}" ] || continue
+                RID=$(echo "$REL" | jq -r '.id // empty')
+                RTAG=$(echo "$REL" | jq -r '.tag // "unknown"')
+                RPUB=$(echo "$REL" | jq -r '.published // "1970-01-01T00:00:00Z"')
+                [ -n "${RID:-}" ] || continue
+
+                for APAGE in 1 2 3 4; do
+                  AJSON=$(github_api_get_json_array "https://api.github.com/repos/${REPO}/releases/${RID}/assets?per_page=100&page=${APAGE}" || true)
+                  [ -n "${AJSON:-}" ] || break
+                  ACNT=$(echo "$AJSON" | jq 'length')
+                  [ "$ACNT" -gt 0 ] || break
+
+                  echo "$AJSON" | jq -c --arg tag "$RTAG" --arg pub "$RPUB" '
+                    .[]
+                    | select(.name and .browser_download_url)
+                    | {
+                        name: .name,
+                        url: .browser_download_url,
+                        release_tag: $tag,
+                        published_at: $pub
+                      }
+                  ' >> candidates/assets_meta.ndjson
+                done
+              done < <(jq -rc '.[] | {id: .id, tag: (.tag_name // "unknown"), published: (.published_at // .created_at // "1970-01-01T00:00:00Z")}' releases_filtered.json)
+
+              if [ -s candidates/assets_meta.ndjson ]; then
+                jq -s '
+                  map(select((.name | ascii_downcase | contains("anykernel3")) and (.name | endswith(".zip"))))
+                ' candidates/assets_meta.ndjson > candidates/assets_meta.json
+              else
+                echo '[]' > candidates/assets_meta.json
+              fi
             else
               echo '[]' > candidates/assets_meta.json
             fi
