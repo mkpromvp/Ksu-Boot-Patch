@@ -467,4 +467,335 @@ jobs:
             elif echo "$TAG_PART" | grep -Eq '^r[0-9]+$'; then
               TVREL=$(echo "$TAG_PART" | sed -E 's/^r([0-9]+)$/\1/')
               TAG_SCORE=$((10#$TVREL))
-            elif echo "$TAG_PART" | gr
+            elif echo "$TAG_PART" | grep -Eq '.*-r[0-9]+$'; then
+              TVREL=$(echo "$TAG_PART" | sed -E 's/.*-r([0-9]+)$/\1/')
+              TAG_SCORE=$((10#$TVREL))
+            fi
+
+            printf "%07d|%015d|%s\n" "$SCORE" "$TAG_SCORE" "$U" >> candidates/urls_scored.txt
+          done < candidates/urls.txt
+
+          sort -t'|' -k1,1nr -k2,2nr candidates/urls_scored.txt | cut -d'|' -f3- > candidates/urls_sorted.txt
+          mv candidates/urls_sorted.txt candidates/urls.txt
+
+          # If exact match is required, prefer exact filename matches first.
+          if [ "${{ inputs.require_exact_kver }}" = "true" ] && [ -n "${KVER:-}" ] && [ "$KVER" != "unknown" ]; then
+            awk -v kv="$KVER" -v an="$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')" '
+              BEGIN { IGNORECASE=1 }
+              {
+                line=$0
+                low=tolower(line)
+                if (index(line, kv) > 0) {
+                  if (an == "" || an == "unknown" || index(low, an) > 0) print line
+                }
+              }
+            ' candidates/urls.txt > candidates/urls_exact.txt
+
+            if [ -s candidates/urls_exact.txt ]; then
+              mv candidates/urls_exact.txt candidates/urls.txt
+              echo "MATCH_MODE=${MATCH_MODE:-unknown}+exact-name" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          head -n 80 candidates/urls.txt > candidates/urls_limited.txt
+          mv candidates/urls_limited.txt candidates/urls.txt
+
+          echo "=== Top candidate URLs (ordered) ==="
+          nl -ba candidates/urls.txt
+
+      - name: Select best kernel candidate (SUSFS-first scoring)
+        if: >
+          inputs.gki_source == 'WildKernels' ||
+          inputs.gki_source == 'zzh20188' ||
+          inputs.gki_source == 'zzh20188-ReSukiSU'
+        run: |
+          set -euo pipefail
+
+          BEST_SCORE=-1
+          BEST_URL=""
+          BEST_IMG=""
+          BEST_SUSFS="no"
+          BEST_BYPASS="no"
+          BEST_EXACT="no"
+          BEST_SUSFS_NEW="no"
+          i=0
+
+          while IFS= read -r URL; do
+            i=$((i + 1))
+            [ -n "${URL:-}" ] || continue
+
+            URL_L=$(echo "$URL" | tr '[:upper:]' '[:lower:]')
+
+            CZIP="candidates/cand_${i}.zip"
+            CDIR="candidates/cand_${i}"
+
+            rm -rf "$CDIR"
+            mkdir -p "$CDIR"
+
+            echo "--- Candidate #$i ---"
+            echo "URL: $URL"
+            curl -L --progress-bar --connect-timeout 20 --max-time 240 "$URL" -o "$CZIP"
+            [ -s "$CZIP" ] || { echo "empty download, skip"; continue; }
+
+            unzip -q "$CZIP" -d "$CDIR" || { echo "unzip failed, skip"; continue; }
+
+            CIMG=$(find "$CDIR" -type f \( -name Image -o -name Image.gz -o -name Image.lz4 -o -name kernel \) | head -1 || true)
+            [ -n "${CIMG:-}" ] || { echo "no kernel image, skip"; continue; }
+
+            OUTK="candidates/out_${i}.img"
+            if file "$CIMG" | grep -qi gzip; then
+              gunzip -c "$CIMG" > "$OUTK" || cp "$CIMG" "$OUTK"
+            elif file "$CIMG" | grep -qi lz4; then
+              ./magiskboot decompress "$CIMG" "$OUTK" 2>/dev/null || cp "$CIMG" "$OUTK"
+            else
+              cp "$CIMG" "$OUTK"
+            fi
+            [ -s "$OUTK" ] || { echo "failed to extract image, skip"; continue; }
+
+            SCORE=0
+            HAS_SUSFS="no"
+            HAS_BYPASS="no"
+            HAS_EXACT="no"
+            HAS_NAME_EXACT="no"
+            HAS_SUSFS_NEW="no"
+
+            CKFULL=$(strings "$OUTK" 2>/dev/null | grep -oP 'Linux version \K[0-9][^\s]*' | head -1 || true)
+            CKVER=$(echo "$CKFULL" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+            CANDROID=$(echo "$CKFULL" | grep -oP 'android[0-9]+' | head -1 || true)
+            if [ -n "${CKVER:-}" ] && [ -n "${CANDROID:-}" ] && [ "$CKVER" = "$KVER" ] && [ "$CANDROID" = "$ANDROID" ]; then
+              HAS_EXACT="yes"
+              SCORE=$((SCORE + 120))
+            elif [ -n "${CKVER:-}" ] && [ -n "${CANDROID:-}" ] && [ "$CANDROID" = "$ANDROID" ] && echo "$CKVER" | grep -q "^${KSHORT}"; then
+              SCORE=$((SCORE + 45))
+            fi
+
+            if [ -n "${KVER:-}" ] && [ "$KVER" != "unknown" ] && echo "$URL" | grep -q "$KVER"; then
+              if [ -z "${ANDROID:-}" ] || [ "$ANDROID" = "unknown" ] || echo "$URL_L" | grep -q "$(echo "$ANDROID" | tr '[:upper:]' '[:lower:]')"; then
+                HAS_NAME_EXACT="yes"
+                SCORE=$((SCORE + 35))
+              fi
+            fi
+
+            if strings "$OUTK" 2>/dev/null | grep -Eiq 'susfs|ksu_susfs|sus_su'; then
+              HAS_SUSFS="yes"
+              SCORE=$((SCORE + 80))
+            fi
+
+            if strings "$OUTK" 2>/dev/null | grep -Eiq 'susfs[^[:alnum:]]*v?(2\.[1-9]|[3-9]\.)|susfs v2\.[1-9]'; then
+              HAS_SUSFS_NEW="yes"
+              SCORE=$((SCORE + 20))
+            fi
+
+            if echo "$URL_L" | grep -qiE 'bypass'; then
+              HAS_BYPASS="yes"
+              SCORE=$((SCORE + 40))
+            fi
+
+            if echo "$URL" | grep -qi "$KVER"; then
+              SCORE=$((SCORE + 20))
+            elif echo "$URL" | grep -qi "$KSHORT"; then
+              SCORE=$((SCORE + 10))
+            fi
+
+            if [ "${{ inputs.gki_source }}" = "zzh20188-ReSukiSU" ] && echo "$URL_L" | grep -Eiq 'resukisu|sukisu'; then
+              SCORE=$((SCORE + 10))
+            fi
+
+            if echo "$URL_L" | grep -qiE 'exp|experimental'; then
+              SCORE=$((SCORE - 15))
+            fi
+
+            echo "score=$SCORE susfs=$HAS_SUSFS susfs_new=$HAS_SUSFS_NEW bypass=$HAS_BYPASS exact=$HAS_EXACT name_exact=$HAS_NAME_EXACT ckver=${CKVER:-unknown}"
+
+            if [ "$HAS_SUSFS" != "yes" ]; then
+              echo "skip: SUSFS missing"
+              continue
+            fi
+
+            if [ "${{ inputs.require_exact_kver }}" = "true" ] && [ "$HAS_EXACT" != "yes" ]; then
+              if [ "$HAS_NAME_EXACT" != "yes" ]; then
+                echo "skip: require_exact_kver=true and candidate is not exact ($CKVER/$CANDROID vs $KVER/$ANDROID)"
+                continue
+              fi
+              echo "warn: kernel strings missing exact version, accepting filename-exact candidate"
+            fi
+
+            if [ "${{ inputs.require_exact_kver }}" = "true" ] && [ "$HAS_EXACT" != "yes" ] && [ "$HAS_NAME_EXACT" != "yes" ]; then
+              continue
+            fi
+
+            if [ "$SCORE" -gt "$BEST_SCORE" ]; then
+              BEST_SCORE="$SCORE"
+              BEST_URL="$URL"
+              BEST_IMG="$OUTK"
+              BEST_SUSFS="$HAS_SUSFS"
+              BEST_BYPASS="$HAS_BYPASS"
+              BEST_EXACT="$HAS_EXACT"
+              BEST_SUSFS_NEW="$HAS_SUSFS_NEW"
+
+              if [ "$BEST_EXACT" = "yes" ] && [ "$BEST_SUSFS" = "yes" ] && [ "$BEST_SCORE" -ge 220 ]; then
+                echo "early-stop: high confidence candidate found"
+                break
+              fi
+            fi
+          done < candidates/urls.txt
+
+          [ -n "${BEST_IMG:-}" ] || { echo "::error::No valid kernel candidate found with SUSFS"; exit 1; }
+          cp "$BEST_IMG" out/Image
+
+          echo "BEST_URL=$BEST_URL" >> "$GITHUB_ENV"
+          echo "BEST_SCORE=$BEST_SCORE" >> "$GITHUB_ENV"
+          echo "SUSFS_KERNEL=$BEST_SUSFS" >> "$GITHUB_ENV"
+          echo "SUSFS_NEW_HINT=$BEST_SUSFS_NEW" >> "$GITHUB_ENV"
+          echo "BYPASS_BUILD=$BEST_BYPASS" >> "$GITHUB_ENV"
+          echo "KERNEL_EXACT_MATCH=$BEST_EXACT" >> "$GITHUB_ENV"
+
+          echo "Selected candidate: $BEST_URL"
+          echo "score=$BEST_SCORE susfs=$BEST_SUSFS susfs_new=$BEST_SUSFS_NEW bypass=$BEST_BYPASS exact=$BEST_EXACT"
+
+      - name: Build patched boot image
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.gki_source }}" = "WildKernels" ] || [ "${{ inputs.gki_source }}" = "zzh20188" ] || [ "${{ inputs.gki_source }}" = "zzh20188-ReSukiSU" ]; then
+            [ -s out/Image ] || { echo "::error::out/Image missing"; exit 1; }
+            KFILE_BASE=$(basename "$KFILE")
+            cd workspace
+            cp ../out/Image "$KFILE_BASE"
+            ../magiskboot repack boot.img ../patched_boot.img
+            cd ..
+          else
+            cp boot.img patched_boot.img
+          fi
+
+          [ -s patched_boot.img ] || { echo "::error::patched_boot.img missing"; exit 1; }
+          ls -lh patched_boot.img
+
+      - name: Download manager and optional modules
+        run: |
+          set -euo pipefail
+
+          fetch_latest_asset() {
+            local repo="$1"
+            local regex="$2"
+            local out="$3"
+            [ -n "${repo:-}" ] || return 0
+
+            URL=$(curl -sf "https://api.github.com/repos/${repo}/releases/latest" \
+              | jq -r --arg re "$regex" '.assets[] | select(.name | test($re; "i")) | .browser_download_url' \
+              | head -1 || true)
+            if [ -n "${URL:-}" ] && [ "$URL" != "null" ]; then
+              echo "Downloading $out from $repo"
+              curl -L --progress-bar "$URL" -o "$out" || true
+            fi
+          }
+
+          mkdir -p managers modules
+
+          fetch_latest_asset "$MGR1_REPO" "\\.apk$" "managers/${MGR1_NAME:-manager1}.apk"
+          fetch_latest_asset "$MGR2_REPO" "\\.apk$" "managers/${MGR2_NAME:-manager2}.apk"
+
+          if [ "${{ inputs.include_susfs_module }}" = "true" ]; then
+            fetch_latest_asset "sidex15/susfs4ksu-module" "\\.zip$" "modules/SUSFS_Module.zip"
+          fi
+
+          if [ "${{ inputs.include_zygisk }}" = "true" ]; then
+            fetch_latest_asset "Dr-TSNG/ZygiskNext" "\\.zip$" "modules/ZygiskNext.zip"
+            fetch_latest_asset "LSPosed/LSPosed.github.io" "Shamiko.*\\.zip$" "modules/Shamiko.zip"
+          fi
+
+          if [ "${{ inputs.include_lsposed }}" = "true" ]; then
+            fetch_latest_asset "LSPosed/LSPosed" "(zygisk|release).*(\\.zip|\\.apk)$" "modules/LSPosed.pkg"
+          fi
+
+      - name: Create report
+        run: |
+          set -euo pipefail
+          {
+            echo "KSU Boot Patcher Report"
+            echo "======================="
+            echo "Source: ${{ inputs.gki_source }}"
+            echo "Detected KVER: ${KVER:-unknown}"
+            echo "Detected KSHORT: ${KSHORT:-unknown}"
+            echo "Detected ANDROID: ${ANDROID:-unknown}"
+            echo "Detected KMI: ${KMI:-unknown}"
+            echo "Release Tag: ${RELEASE_TAG:-n/a}"
+            echo "Match Mode: ${MATCH_MODE:-n/a}"
+            echo "Best Candidate URL: ${BEST_URL:-n/a}"
+            echo "Best Score: ${BEST_SCORE:-n/a}"
+            echo "SUSFS Present: ${SUSFS_KERNEL:-n/a}"
+            echo "SUSFS New Hint: ${SUSFS_NEW_HINT:-n/a}"
+            echo "Exact Kernel Match: ${KERNEL_EXACT_MATCH:-n/a}"
+            echo "Bypass Build: ${BYPASS_BUILD:-n/a}"
+          } > report/summary.txt
+
+          cp patched_boot.img report/
+          ls -lah report
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ksu_patched_output
+          path: |
+            patched_boot.img
+            report/summary.txt
+            managers/*
+            modules/*
+          if-no-files-found: warn
+
+      - name: Package output for Gofile
+        run: |
+          set -euo pipefail
+          mkdir -p gofile_pkg
+          cp patched_boot.img gofile_pkg/ 2>/dev/null || true
+          cp report/summary.txt gofile_pkg/ 2>/dev/null || true
+          [ -d managers ] && cp -r managers gofile_pkg/ 2>/dev/null || true
+          [ -d modules ] && cp -r modules gofile_pkg/ 2>/dev/null || true
+          cd gofile_pkg
+          zip -r ../ksu_patched_output.zip . -x '*.zip'
+          cd ..
+          ls -lh ksu_patched_output.zip
+
+      - name: Upload to Gofile
+        id: gofile
+        run: |
+          set -euo pipefail
+
+          get_server() {
+            curl -sS --retry 3 --retry-all-errors --connect-timeout 15 --max-time 30 \
+              "https://api.gofile.io/servers" | jq -r '.data.servers[0].name // empty'
+          }
+
+          SERVER=""
+          for attempt in 1 2 3; do
+            SERVER=$(get_server || true)
+            [ -n "${SERVER:-}" ] && break
+            echo "warn: could not fetch gofile server, retry $attempt..."
+            sleep 3
+          done
+
+          if [ -z "${SERVER:-}" ]; then
+            echo "::warning::Could not reach Gofile API to get an upload server, skipping upload"
+            exit 0
+          fi
+
+          echo "Using Gofile server: $SERVER"
+
+          RESP=$(curl -sS --retry 3 --retry-all-errors --connect-timeout 20 --max-time 600 \
+            -F "file=@ksu_patched_output.zip" \
+            "https://${SERVER}.gofile.io/uploadFile")
+
+          echo "Raw response: $RESP"
+
+          STATUS=$(echo "$RESP" | jq -r '.status // "error"')
+          if [ "$STATUS" != "ok" ]; then
+            echo "::warning::Gofile upload did not return ok status, skipping link"
+            exit 0
+          fi
+
+          LINK=$(echo "$RESP" | jq -r '.data.downloadPage // empty')
+          [ -n "${LINK:-}" ] || { echo "::warning::Gofile upload succeeded but no downloadPage in response"; exit 0; }
+
+          echo "GOFILE_LINK=$LINK" >> "$GITHUB_ENV"
+          echo "### 📦 Gofile Download Link" >> "$GITHUB_STEP_SUMMARY"
+          echo "$LINK" >> "$GITHUB_STEP_SUMMARY"
+          echo "Gofile link: $LINK"
