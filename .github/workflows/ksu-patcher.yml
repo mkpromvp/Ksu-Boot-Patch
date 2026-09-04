@@ -119,7 +119,7 @@ jobs:
             [ -s kfile_dec ] && KTARGET="kfile_dec"
           fi
 
-          FULL=$(strings "$KTARGET" 2>/dev/null | grep -oP 'Linux version \K[^\s]+' | head -1 || true)
+          FULL=$(strings "$KTARGET" 2>/dev/null | grep -oP 'Linux version \K[0-9][^\s]*' | head -1 || true)
           if [ -n "${FULL:-}" ]; then
             KVER=$(echo "$FULL" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || true)
             KSHORT=$(echo "$FULL" | grep -oP '^[0-9]+\.[0-9]+' || true)
@@ -559,7 +559,7 @@ jobs:
             HAS_NAME_EXACT="no"
             HAS_SUSFS_NEW="no"
 
-            CKFULL=$(strings "$OUTK" 2>/dev/null | grep -oP 'Linux version \K[^\s]+' | head -1 || true)
+            CKFULL=$(strings "$OUTK" 2>/dev/null | grep -oP 'Linux version \K[0-9][^\s]*' | head -1 || true)
             CKVER=$(echo "$CKFULL" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+' || true)
             CANDROID=$(echo "$CKFULL" | grep -oP 'android[0-9]+' | head -1 || true)
             if [ -n "${CKVER:-}" ] && [ -n "${CANDROID:-}" ] && [ "$CKVER" = "$KVER" ] && [ "$CANDROID" = "$ANDROID" ]; then
